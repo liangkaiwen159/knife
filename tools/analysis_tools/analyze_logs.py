@@ -18,9 +18,8 @@ def cal_train_time(log_dicts, args):
             else:
                 all_times.append(log_dict[epoch]['time'][1:])
         if not all_times:
-            raise KeyError(
-                'Please reduce the log interval in the config so that'
-                'interval is less than iterations of one epoch.')
+            raise KeyError('Please reduce the log interval in the config so that'
+                           'interval is less than iterations of one epoch.')
         epoch_ave_time = np.array(list(map(lambda x: np.mean(x), all_times)))
         slowest_epoch = epoch_ave_time.argmax()
         fastest_epoch = epoch_ave_time.argmin()
@@ -55,16 +54,14 @@ def plot_curve(log_dicts, args):
             print(f'plot curve of {args.json_logs[i]}, metric is {metric}')
             if metric not in log_dict[epochs[int(args.eval_interval) - 1]]:
                 if 'mAP' in metric:
-                    raise KeyError(
-                        f'{args.json_logs[i]} does not contain metric '
-                        f'{metric}. Please check if "--no-validate" is '
-                        'specified when you trained the model. Or check '
-                        f'if the eval_interval {args.eval_interval} in args '
-                        'is equal to the eval_interval during training.')
-                raise KeyError(
-                    f'{args.json_logs[i]} does not contain metric {metric}. '
-                    'Please reduce the log interval in the config so that '
-                    'interval is less than iterations of one epoch.')
+                    raise KeyError(f'{args.json_logs[i]} does not contain metric '
+                                   f'{metric}. Please check if "--no-validate" is '
+                                   'specified when you trained the model. Or check '
+                                   f'if the eval_interval {args.eval_interval} in args '
+                                   'is equal to the eval_interval during training.')
+                raise KeyError(f'{args.json_logs[i]} does not contain metric {metric}. '
+                               'Please reduce the log interval in the config so that '
+                               'interval is less than iterations of one epoch.')
 
             if 'mAP' in metric:
                 xs = []
@@ -78,15 +75,20 @@ def plot_curve(log_dicts, args):
             else:
                 xs = []
                 ys = []
+                _iters = []
+                _epochs = []
                 for epoch in epochs:
                     iters = log_dict[epoch]['step']
                     xs.append(np.array(iters))
                     ys.append(np.array(log_dict[epoch][metric][:len(iters)]))
+                    _iters.append(max(iters))
+                    _epochs.append(epoch)
                 xs = np.concatenate(xs)
                 ys = np.concatenate(ys)
-                plt.xlabel('iter')
-                plt.plot(
-                    xs, ys, label=legend[i * num_metrics + j], linewidth=0.5)
+                # plt.xlabel('iter')
+                plt.xlabel('epoch')
+                plt.xticks([0] + _iters, [0] + _epochs)
+                plt.plot(xs, ys, label=legend[i * num_metrics + j], linewidth=0.5)
             plt.legend()
         if args.title is not None:
             plt.title(args.title)
@@ -99,57 +101,30 @@ def plot_curve(log_dicts, args):
 
 
 def add_plot_parser(subparsers):
-    parser_plt = subparsers.add_parser(
-        'plot_curve', help='parser for plotting curves')
-    parser_plt.add_argument(
-        'json_logs',
-        type=str,
-        nargs='+',
-        help='path of train log in json format')
-    parser_plt.add_argument(
-        '--keys',
-        type=str,
-        nargs='+',
-        default=['bbox_mAP'],
-        help='the metric that you want to plot')
-    parser_plt.add_argument(
-        '--start-epoch',
-        type=str,
-        default='1',
-        help='the epoch that you want to start')
-    parser_plt.add_argument(
-        '--eval-interval',
-        type=str,
-        default='1',
-        help='the eval interval when training')
+    parser_plt = subparsers.add_parser('plot_curve', help='parser for plotting curves')
+    parser_plt.add_argument('json_logs', type=str, nargs='+', help='path of train log in json format')
+    parser_plt.add_argument('--keys',
+                            type=str,
+                            nargs='+',
+                            default=['bbox_mAP'],
+                            help='the metric that you want to plot')
+    parser_plt.add_argument('--start-epoch', type=str, default='1', help='the epoch that you want to start')
+    parser_plt.add_argument('--eval-interval', type=str, default='1', help='the eval interval when training')
     parser_plt.add_argument('--title', type=str, help='title of figure')
-    parser_plt.add_argument(
-        '--legend',
-        type=str,
-        nargs='+',
-        default=None,
-        help='legend of each plot')
-    parser_plt.add_argument(
-        '--backend', type=str, default=None, help='backend of plt')
-    parser_plt.add_argument(
-        '--style', type=str, default='dark', help='style of plt')
+    parser_plt.add_argument('--legend', type=str, nargs='+', default=None, help='legend of each plot')
+    parser_plt.add_argument('--backend', type=str, default=None, help='backend of plt')
+    parser_plt.add_argument('--style', type=str, default='dark', help='style of plt')
     parser_plt.add_argument('--out', type=str, default=None)
 
 
 def add_time_parser(subparsers):
-    parser_time = subparsers.add_parser(
-        'cal_train_time',
-        help='parser for computing the average time per training iteration')
-    parser_time.add_argument(
-        'json_logs',
-        type=str,
-        nargs='+',
-        help='path of train log in json format')
-    parser_time.add_argument(
-        '--include-outliers',
-        action='store_true',
-        help='include the first value of every epoch when computing '
-        'the average time')
+    parser_time = subparsers.add_parser('cal_train_time',
+                                        help='parser for computing the average time per training iteration')
+    parser_time.add_argument('json_logs', type=str, nargs='+', help='path of train log in json format')
+    parser_time.add_argument('--include-outliers',
+                             action='store_true',
+                             help='include the first value of every epoch when computing '
+                             'the average time')
 
 
 def parse_args():

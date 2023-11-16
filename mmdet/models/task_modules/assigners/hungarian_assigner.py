@@ -10,7 +10,7 @@ from torch import Tensor
 from mmdet.registry import TASK_UTILS
 from .assign_result import AssignResult
 from .base_assigner import BaseAssigner
-
+import copy
 
 @TASK_UTILS.register_module()
 class HungarianAssigner(BaseAssigner):

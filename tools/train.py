@@ -10,6 +10,8 @@ from mmengine.runner import Runner
 from mmdet.utils import setup_cache_size_limit_of_dynamo
 
 
+from mmdet.utils import register_all_modules
+# import debugpy; debugpy.connect(('127.0.0.1', 5678))
 def parse_args():
     parser = argparse.ArgumentParser(description='Train a detector')
     parser.add_argument('config', help='train config file path')
@@ -104,6 +106,8 @@ def main():
         cfg.resume = True
         cfg.load_from = args.resume
 
+    register_all_modules()
+    
     # build the runner from config
     if 'runner_type' not in cfg:
         # build the default runner
@@ -112,7 +116,7 @@ def main():
         # build customized runner from the registry
         # if 'runner_type' is set in the cfg
         runner = RUNNERS.build(cfg)
-
+    
     # start training
     runner.train()
 

@@ -116,8 +116,14 @@ data
 docs/modelzoo_statistics.md
 mmdet/.mim
 work_dirs/
-
+remain/
 # Pytorch
 *.pth
 *.py~
 *.sh~
+
+data/
+icann_dino.txt
+output/
+.history
+*.png

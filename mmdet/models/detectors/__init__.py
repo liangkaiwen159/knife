@@ -58,6 +58,9 @@ from .yolact import YOLACT
 from .yolo import YOLOV3
 from .yolof import YOLOF
 from .yolox import YOLOX
+from .icann_dino import ICANN_DINO
+from .icann_defor_detr import ICANN_Defor_Detr
+from .rot_dino import Rot_DINO
 
 __all__ = [
     'ATSS', 'BaseDetector', 'SingleStageDetector', 'TwoStageDetector', 'RPN',
@@ -71,5 +74,6 @@ __all__ = [
     'MaskFormer', 'DDOD', 'Mask2Former', 'SemiBaseDetector', 'SoftTeacher',
     'RTMDet', 'Detectron2Wrapper', 'CrowdDet', 'CondInst', 'BoxInst',
     'DetectionTransformer', 'ConditionalDETR', 'DINO', 'DABDETR', 'GLIP',
-    'DDQDETR', 'GroundingDINO'
+    'DDQDETR', 'GroundingDINO', 'ICANN_DINO', 'ICANN_Defor_Detr',
+    'Rot_DINO'
 ]

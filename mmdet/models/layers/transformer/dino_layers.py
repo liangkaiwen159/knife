@@ -1,6 +1,7 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 import warnings
 from typing import Tuple, Union
+from mmengine import ConfigDict
 
 import torch
 from mmengine.model import BaseModule
@@ -8,27 +9,48 @@ from torch import Tensor, nn
 
 from mmdet.structures import SampleList
 from mmdet.structures.bbox import bbox_xyxy_to_cxcywh
-from mmdet.utils import OptConfigType
+from mmdet.utils import ConfigType, OptConfigType
 from .deformable_detr_layers import DeformableDetrTransformerDecoder
-from .utils import MLP, coordinate_to_encoding, inverse_sigmoid
+from .utils import MLP, coordinate_to_encoding, inverse_sigmoid, inverse_rot_coord_sigmoid, inverse_act_rot_sigmoid, act_rot_sigmoid, rot_coord_sigmoid
+from mmengine.logging import MMLogger, print_log
+import logging
+from mmdet.structures.bbox import get_box_tensor, RotatedBoxes
+import numpy as np
+from mmdet.models.task_modules.coders import DeltaXYWHTRBBoxCoder
+from mmdet.registry import TASK_UTILS
+import copy
 
 
 class DinoTransformerDecoder(DeformableDetrTransformerDecoder):
     """Transformer decoder of DINO."""
 
+    def __init__(self, angle_version: str='le90', *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.angle_version = angle_version
+
     def _init_layers(self) -> None:
         """Initialize decoder layers."""
         super()._init_layers()
-        self.ref_point_head = MLP(self.embed_dims * 2, self.embed_dims,
-                                  self.embed_dims, 2)
+        self.ref_point_head = MLP(self.embed_dims * 2, self.embed_dims, self.embed_dims, 2)
         self.norm = nn.LayerNorm(self.embed_dims)
+
+    def _build_bbox_decoder(self):
+        assert hasattr(self, 'angle_version')
+        self.bbox_coder = TASK_UTILS.build(
+            dict(type='DeltaXYWHTRBBoxCoder',
+                 edge_swap=True,
+                 proj_xy=True,
+                 angle_version=self.angle_version,
+                 use_box_type=False,
+                 target_means=(0.0, 0.0, 0.0, 0.0, 0.0),
+                 target_stds=(1.0, 1.0, 1.0, 1.0, 1.0)))
 
     def forward(self, query: Tensor, value: Tensor, key_padding_mask: Tensor,
                 self_attn_mask: Tensor, reference_points: Tensor,
                 spatial_shapes: Tensor, level_start_index: Tensor,
                 valid_ratios: Tensor, reg_branches: nn.ModuleList,
                 **kwargs) -> Tuple[Tensor]:
-        """Forward function of Transformer decoder.
+        """Forward function of Transformer encoder.
 
         Args:
             query (Tensor): The input query, has shape (num_queries, bs, dim).
@@ -68,6 +90,7 @@ class DinoTransformerDecoder(DeformableDetrTransformerDecoder):
               layers, has shape (num_decoder_layers, bs, num_queries, 4). The
               coordinates are arranged as (cx, cy, w, h)
         """
+        rot_branches = kwargs.get('rot_branches', None)
         intermediate = []
         intermediate_reference_points = [reference_points]
         for lid, layer in enumerate(self.layers):
@@ -75,33 +98,53 @@ class DinoTransformerDecoder(DeformableDetrTransformerDecoder):
                 reference_points_input = \
                     reference_points[:, :, None] * torch.cat(
                         [valid_ratios, valid_ratios], -1)[:, None]
+            elif reference_points.shape[-1] == 5:
+                reference_points_input = \
+                    reference_points[...,:4][:, :, None] * torch.cat(
+                        [valid_ratios, valid_ratios], -1)[:, None]
+                reference_points_input = torch.cat(
+                    (reference_points_input, reference_points[..., 4:][:, :, None].repeat(
+                        1, 1, valid_ratios.size(1), 1)), -1)
             else:
                 assert reference_points.shape[-1] == 2
                 reference_points_input = \
                     reference_points[:, :, None] * valid_ratios[:, None]
 
-            query_sine_embed = coordinate_to_encoding(
-                reference_points_input[:, :, 0, :])
+            query_sine_embed = coordinate_to_encoding(reference_points_input[:, :, 0, :])
             query_pos = self.ref_point_head(query_sine_embed)
 
-            query = layer(
-                query,
-                query_pos=query_pos,
-                value=value,
-                key_padding_mask=key_padding_mask,
-                self_attn_mask=self_attn_mask,
-                spatial_shapes=spatial_shapes,
-                level_start_index=level_start_index,
-                valid_ratios=valid_ratios,
-                reference_points=reference_points_input,
-                **kwargs)
+            query = layer(query,
+                          query_pos=query_pos,
+                          value=value,
+                          key_padding_mask=key_padding_mask,
+                          self_attn_mask=self_attn_mask,
+                          spatial_shapes=spatial_shapes,
+                          level_start_index=level_start_index,
+                          valid_ratios=valid_ratios,
+                          reference_points=reference_points_input,
+                          **kwargs)
 
-            if reg_branches is not None:
+            if reg_branches is not None and rot_branches is None:
                 tmp = reg_branches[lid](query)
                 assert reference_points.shape[-1] == 4
-                new_reference_points = tmp + inverse_sigmoid(
-                    reference_points, eps=1e-3)
+                new_reference_points = tmp + inverse_sigmoid(reference_points[..., :4], eps=1e-3)
                 new_reference_points = new_reference_points.sigmoid()
+                reference_points = new_reference_points.detach()
+
+            elif reg_branches is not None and rot_branches is not None:
+                tmp = reg_branches[lid](query)
+                tmp_rot = rot_branches[lid](query)
+                # assert reference_points.shape[-1] == 5
+                # new_reference_points = self.bbox_coder.decode(reference_points, torch.cat((tmp.sigmoid(), tmp_rot),
+                #                                                                           -1)).to(tmp.device)
+                # new_reference_points[..., :4].clamp(0.0, 1.0)
+                # reference_points = new_reference_points.detach()
+
+                # cxcywh
+                new_reference_points = torch.cat(
+                    (tmp, tmp_rot), -1) + inverse_rot_coord_sigmoid(reference_points, self.angle_version, eps=1e-3)
+                new_reference_points = rot_coord_sigmoid(new_reference_points, self.angle_version)
+                # rot
                 reference_points = new_reference_points.detach()
 
             if self.return_intermediate:
@@ -111,8 +154,7 @@ class DinoTransformerDecoder(DeformableDetrTransformerDecoder):
                 # in the DeformDETR, reference_points was appended.
 
         if self.return_intermediate:
-            return torch.stack(intermediate), torch.stack(
-                intermediate_reference_points)
+            return torch.stack(intermediate), torch.stack(intermediate_reference_points)
 
         return query, reference_points
 
@@ -183,6 +225,8 @@ class CdnQueryGenerator(BaseModule):
         # is not used in the original DINO.
         # TODO: num_classes + 1 or num_classes ?
         self.label_embedding = nn.Embedding(self.num_classes, self.embed_dims)
+        self.logger = MMLogger.get_current_instance()
+        self.logger_name = self.logger.instance_name
 
     def __call__(self, batch_data_samples: SampleList) -> tuple:
         """Generate contrastive denoising (cdn) queries with ground truth.
@@ -233,8 +277,7 @@ class CdnQueryGenerator(BaseModule):
         for sample in batch_data_samples:
             img_h, img_w = sample.img_shape
             bboxes = sample.gt_instances.bboxes
-            factor = bboxes.new_tensor([img_w, img_h, img_w,
-                                        img_h]).unsqueeze(0)
+            factor = bboxes.new_tensor([img_w, img_h, img_w, img_h]).unsqueeze(0)
             bboxes_normalized = bboxes / factor
             gt_bboxes_list.append(bboxes_normalized)
             gt_labels_list.append(sample.gt_instances.labels)
@@ -245,24 +288,22 @@ class CdnQueryGenerator(BaseModule):
         max_num_target = max(num_target_list)
         num_groups = self.get_num_groups(max_num_target)
 
-        dn_label_query = self.generate_dn_label_query(gt_labels, num_groups)
-        dn_bbox_query = self.generate_dn_bbox_query(gt_bboxes, num_groups)
+        dn_label_query = self.generate_dn_label_query(gt_labels, num_groups)  # [num_targets * num_groups * 2, 256]
+        dn_bbox_query = self.generate_dn_bbox_query(gt_bboxes, num_groups)  # [num_targets * num_groups * 2, 4]
 
         # The `batch_idx` saves the batch index of the corresponding sample
         # for each target, has shape (num_target_total).
-        batch_idx = torch.cat([
-            torch.full_like(t.long(), i) for i, t in enumerate(gt_labels_list)
-        ])
-        dn_label_query, dn_bbox_query = self.collate_dn_queries(
+        batch_idx = torch.cat([torch.full_like(t.long(), i) for i, t in enumerate(gt_labels_list)])  # [num_targets]
+        dn_label_query, dn_bbox_query = self.collate_dn_queries(  # 按照batch 收集
             dn_label_query, dn_bbox_query, batch_idx, len(batch_data_samples),
-            num_groups)
+            num_groups)  # [bs, max_num_target * num_groups * 2, 256], [bs, max_num_target * num_groups * 2, 4]
 
-        attn_mask = self.generate_dn_mask(
-            max_num_target, num_groups, device=dn_label_query.device)
+        attn_mask = self.generate_dn_mask(  # [max_num_target * num_groups * 2 + num_querys, max_num_target * num_groups * 2 + num_querys)
+            max_num_target,
+            num_groups,
+            device=dn_label_query.device)
 
-        dn_meta = dict(
-            num_denoising_queries=int(max_num_target * 2 * num_groups),
-            num_denoising_groups=num_groups)
+        dn_meta = dict(num_denoising_queries=int(max_num_target * 2 * num_groups), num_denoising_groups=num_groups)
 
         return dn_label_query, dn_bbox_query, attn_mask, dn_meta
 
@@ -302,8 +343,7 @@ class CdnQueryGenerator(BaseModule):
             num_groups = 1
         return int(num_groups)
 
-    def generate_dn_label_query(self, gt_labels: Tensor,
-                                num_groups: int) -> Tensor:
+    def generate_dn_label_query(self, gt_labels: Tensor, num_groups: int) -> Tensor:
         """Generate noisy labels and their query embeddings.
 
         The strategy for generating noisy labels is: Randomly choose labels of
@@ -329,19 +369,23 @@ class CdnQueryGenerator(BaseModule):
             num_target_total * num_groups * 2`.
         """
         assert self.label_noise_scale > 0
-        gt_labels_expand = gt_labels.repeat(2 * num_groups,
-                                            1).view(-1)  # Note `* 2`  # noqa
+        gt_labels_expand = gt_labels.repeat(2 * num_groups, 1).view(-1)  # Note `* 2`  # noqa
         p = torch.rand_like(gt_labels_expand.float())
-        chosen_indice = torch.nonzero(p < (self.label_noise_scale * 0.5)).view(
-            -1)  # Note `* 0.5`
+        chosen_indice = torch.nonzero(p < (self.label_noise_scale * 0.5)).view(-1)  # Note `* 0.5`
+        if not chosen_indice.numel():
+            # p = torch.rand_like(gt_labels_expand.float())
+            p -= (1 - self.label_noise_scale * 0.5)
+            chosen_indice = torch.nonzero(p < (self.label_noise_scale * 0.5)).view(-1)  # Note `* 0.5`
+            # print_log(f'randn element:{chosen_indice.numel()}', self.logger_name, logging.WARNING)
+
+        # if not chosen_indice.numel():
+        #     print('debug')
         new_labels = torch.randint_like(chosen_indice, 0, self.num_classes)
-        noisy_labels_expand = gt_labels_expand.scatter(0, chosen_indice,
-                                                       new_labels)
+        noisy_labels_expand = gt_labels_expand.scatter(0, chosen_indice, new_labels)
         dn_label_query = self.label_embedding(noisy_labels_expand)
         return dn_label_query
 
-    def generate_dn_bbox_query(self, gt_bboxes: Tensor,
-                               num_groups: int) -> Tensor:
+    def generate_dn_bbox_query(self, gt_bboxes: Tensor, num_groups: int) -> Tensor:
         """Generate noisy bboxes and their query embeddings.
 
         The strategy for generating noisy bboxes is as follow:
@@ -403,19 +447,16 @@ class CdnQueryGenerator(BaseModule):
         gt_bboxes_expand = gt_bboxes.repeat(2 * num_groups, 1)  # xyxy
 
         # obtain index of negative queries in gt_bboxes_expand
-        positive_idx = torch.arange(
-            len(gt_bboxes), dtype=torch.long, device=device)
+        positive_idx = torch.arange(len(gt_bboxes), dtype=torch.long, device=device)
         positive_idx = positive_idx.unsqueeze(0).repeat(num_groups, 1)
-        positive_idx += 2 * len(gt_bboxes) * torch.arange(
-            num_groups, dtype=torch.long, device=device)[:, None]
+        positive_idx += 2 * len(gt_bboxes) * torch.arange(num_groups, dtype=torch.long, device=device)[:, None]
         positive_idx = positive_idx.flatten()
         negative_idx = positive_idx + len(gt_bboxes)
 
         # determine the sign of each element in the random part of the added
         # noise to be positive or negative randomly.
-        rand_sign = torch.randint_like(
-            gt_bboxes_expand, low=0, high=2,
-            dtype=torch.float32) * 2.0 - 1.0  # [low, high), 1 or -1, randomly
+        rand_sign = torch.randint_like(gt_bboxes_expand, low=0, high=2,
+                                       dtype=torch.float32) * 2.0 - 1.0  # [low, high), 1 or -1, randomly
 
         # calculate the random part of the added noise
         rand_part = torch.rand_like(gt_bboxes_expand)  # [0, 1)
@@ -424,16 +465,14 @@ class CdnQueryGenerator(BaseModule):
 
         # add noise to the bboxes
         bboxes_whwh = bbox_xyxy_to_cxcywh(gt_bboxes_expand)[:, 2:].repeat(1, 2)
-        noisy_bboxes_expand = gt_bboxes_expand + torch.mul(
-            rand_part, bboxes_whwh) * self.box_noise_scale / 2  # xyxy
+        noisy_bboxes_expand = gt_bboxes_expand + torch.mul(rand_part, bboxes_whwh) * self.box_noise_scale / 2  # xyxy
         noisy_bboxes_expand = noisy_bboxes_expand.clamp(min=0.0, max=1.0)
         noisy_bboxes_expand = bbox_xyxy_to_cxcywh(noisy_bboxes_expand)
 
         dn_bbox_query = inverse_sigmoid(noisy_bboxes_expand, eps=1e-3)
         return dn_bbox_query
 
-    def collate_dn_queries(self, input_label_query: Tensor,
-                           input_bbox_query: Tensor, batch_idx: Tensor,
+    def collate_dn_queries(self, input_label_query: Tensor, input_bbox_query: Tensor, batch_idx: Tensor,
                            batch_size: int, num_groups: int) -> Tuple[Tensor]:
         """Collate generated queries to obtain batched dn queries.
 
@@ -476,33 +515,23 @@ class CdnQueryGenerator(BaseModule):
               arranged as (cx, cy, w, h).
         """
         device = input_label_query.device
-        num_target_list = [
-            torch.sum(batch_idx == idx) for idx in range(batch_size)
-        ]
+        num_target_list = [torch.sum(batch_idx == idx) for idx in range(batch_size)]
         max_num_target = max(num_target_list)
         num_denoising_queries = int(max_num_target * 2 * num_groups)
 
-        map_query_index = torch.cat([
-            torch.arange(num_target, device=device)
-            for num_target in num_target_list
-        ])
-        map_query_index = torch.cat([
-            map_query_index + max_num_target * i for i in range(2 * num_groups)
-        ]).long()
+        map_query_index = torch.cat([torch.arange(num_target, device=device) for num_target in num_target_list])
+        map_query_index = torch.cat([map_query_index + max_num_target * i for i in range(2 * num_groups)]).long()
         batch_idx_expand = batch_idx.repeat(2 * num_groups, 1).view(-1)
         mapper = (batch_idx_expand, map_query_index)
 
-        batched_label_query = torch.zeros(
-            batch_size, num_denoising_queries, self.embed_dims, device=device)
-        batched_bbox_query = torch.zeros(
-            batch_size, num_denoising_queries, 4, device=device)
+        batched_label_query = torch.zeros(batch_size, num_denoising_queries, self.embed_dims, device=device)
+        batched_bbox_query = torch.zeros(batch_size, num_denoising_queries, 4, device=device)
 
         batched_label_query[mapper] = input_label_query
         batched_bbox_query[mapper] = input_bbox_query
         return batched_label_query, batched_bbox_query
 
-    def generate_dn_mask(self, max_num_target: int, num_groups: int,
-                         device: Union[torch.device, str]) -> Tensor:
+    def generate_dn_mask(self, max_num_target: int, num_groups: int, device: Union[torch.device, str]) -> Tensor:
         """Generate attention mask to prevent information leakage from
         different denoising groups and matching parts.
 
@@ -542,21 +571,238 @@ class CdnQueryGenerator(BaseModule):
         """
         num_denoising_queries = int(max_num_target * 2 * num_groups)
         num_queries_total = num_denoising_queries + self.num_matching_queries
-        attn_mask = torch.zeros(
-            num_queries_total,
-            num_queries_total,
-            device=device,
-            dtype=torch.bool)
+        attn_mask = torch.zeros(num_queries_total, num_queries_total, device=device, dtype=torch.bool)
         # Make the matching part cannot see the denoising groups
         attn_mask[num_denoising_queries:, :num_denoising_queries] = True
         # Make the denoising groups cannot see each other
         for i in range(num_groups):
             # Mask rows of one group per step.
-            row_scope = slice(max_num_target * 2 * i,
-                              max_num_target * 2 * (i + 1))
+            row_scope = slice(max_num_target * 2 * i, max_num_target * 2 * (i + 1))
             left_scope = slice(max_num_target * 2 * i)
-            right_scope = slice(max_num_target * 2 * (i + 1),
-                                num_denoising_queries)
+            right_scope = slice(max_num_target * 2 * (i + 1), num_denoising_queries)
             attn_mask[row_scope, right_scope] = True
             attn_mask[row_scope, left_scope] = True
         return attn_mask
+
+
+class CdnQueryGenerator_rpn(CdnQueryGenerator):
+
+    def __init__(self, *args, rpn_noise_flag=False, **kwargs) -> None:
+        self.rpn_noise_flag = rpn_noise_flag
+        super().__init__(*args, **kwargs)
+
+    def __call__(self, batch_data_samples: SampleList, rpn_results) -> tuple:
+        if rpn_results:
+            noised_rpn_box, noised_rpn_label_embed, num_rpn_groups = rpn_results
+        else:
+            num_rpn_groups = 0
+        # normalize bbox and collate ground truth (gt)
+        gt_labels_list = []
+        gt_bboxes_list = []
+        for sample in batch_data_samples:
+            img_h, img_w = sample.img_shape
+            bboxes = sample.gt_instances.bboxes
+            factor = bboxes.new_tensor([img_w, img_h, img_w, img_h]).unsqueeze(0)
+            bboxes_normalized = bboxes / factor
+            gt_bboxes_list.append(bboxes_normalized)
+            gt_labels_list.append(sample.gt_instances.labels)
+        gt_labels = torch.cat(gt_labels_list)  # (num_target_total, 4)
+        gt_bboxes = torch.cat(gt_bboxes_list)
+
+        num_target_list = [len(bboxes) for bboxes in gt_bboxes_list]
+        max_num_target = max(num_target_list)
+        num_groups = self.get_num_groups(max_num_target)
+
+        dn_label_query = self.generate_dn_label_query(gt_labels, num_groups)  # [num_targets * num_groups * 2, 256]
+        dn_bbox_query = self.generate_dn_bbox_query(gt_bboxes, num_groups)  # [num_targets * num_groups * 2, 4]
+
+        # The `batch_idx` saves the batch index of the corresponding sample
+        # for each target, has shape (num_target_total).
+        batch_idx = torch.cat([torch.full_like(t.long(), i) for i, t in enumerate(gt_labels_list)])  # [num_targets]
+        dn_label_query, dn_bbox_query = self.collate_dn_queries(  # 按照batch 收集
+            dn_label_query, dn_bbox_query, batch_idx, len(batch_data_samples),
+            num_groups)  # [bs, max_num_target * num_groups * 2, 256], [bs, max_num_target * num_groups * 2, 4]
+        # rpn noised
+        if num_rpn_groups:
+            dn_label_query = torch.cat((dn_label_query, noised_rpn_label_embed), 1)
+            dn_bbox_query = torch.cat((dn_bbox_query, inverse_sigmoid(noised_rpn_box, eps=1e-3)), 1)
+
+        num_groups += num_rpn_groups
+        attn_mask = self.generate_dn_mask(  # [max_num_target * num_groups * 2 + num_querys, max_num_target * num_groups * 2 + num_querys)
+            max_num_target,
+            num_groups,
+            device=dn_label_query.device,
+            rpn_noise_flag=self.rpn_noise_flag,
+            num_rpn_groups=num_rpn_groups)
+
+        dn_meta = dict(num_denoising_queries=int(max_num_target * 2 * num_groups), num_denoising_groups=num_groups)
+
+        return dn_label_query, dn_bbox_query, attn_mask, dn_meta
+
+    def generate_dn_mask(self,
+                         max_num_target: int,
+                         num_groups: int,
+                         device: Union[torch.device, str],
+                         rpn_noise_flag=False,
+                         num_rpn_groups=0) -> Tensor:
+
+        num_denoising_queries = int(max_num_target * 2 * num_groups)
+        num_queries_total = num_denoising_queries + self.num_matching_queries
+        attn_mask = torch.zeros(num_queries_total, num_queries_total, device=device, dtype=torch.bool)
+        # if rpn_noise_flag and num_rpn_groups:
+        #     num_groups -= 1
+        #     num_denoising_queries -= int(max_num_target * 2)
+
+        # Make the denoising groups cannot see each other
+
+        for i in range(num_groups):
+            # Mask rows of one group per step.
+            row_scope = slice(max_num_target * 2 * i, max_num_target * 2 * (i + 1))
+            left_scope = slice(max_num_target * 2 * i)
+            right_scope = slice(max_num_target * 2 * (i + 1), num_denoising_queries)
+            attn_mask[row_scope, right_scope] = True
+            attn_mask[row_scope, left_scope] = True
+        # Make the matching part cannot see the denoising groups
+        if rpn_noise_flag and num_rpn_groups:
+            attn_mask[num_denoising_queries:, :num_denoising_queries] = True
+            # attn_mask[num_denoising_queries:, :num_denoising_queries -
+            #           int(max_num_target * 2)] = True
+            attn_mask[row_scope, right_scope] = False
+            attn_mask[row_scope, left_scope] = False
+        else:
+            attn_mask[num_denoising_queries:, :num_denoising_queries] = True
+        return attn_mask
+
+
+class CdnQueryGenrator_rpn_rot(CdnQueryGenerator_rpn):
+
+    def __init__(self,
+                 *args,
+                 rpn_noise_flag=False,
+                 angle_version: str = 'le90',
+                 bbox_coder_cfg: dict = dict(type='DeltaXYWHTRBBoxCoder',
+                                             edge_swap=True,
+                                             proj_xy=True,
+                                             use_box_type=False,
+                                             target_means=(0.0, 0.0, 0.0, 0.0, 0.0),
+                                             target_stds=(1.0, 1.0, 1.0, 1.0, 1.0)),
+                 **kwargs) -> None:
+        super().__init__(*args, rpn_noise_flag=rpn_noise_flag, **kwargs)
+        self.angle_version = angle_version
+        bbox_coder_cfg.update(dict(angle_version=angle_version))
+        self.bbox_coder_cfg = bbox_coder_cfg
+        self.bbox_coder = TASK_UTILS.build(self.bbox_coder_cfg)
+
+    def __call__(self, batch_data_samples: SampleList, rpn_results=None) -> tuple:
+        if rpn_results:
+            noised_rpn_box, noised_rpn_label_embed, num_rpn_groups = rpn_results
+        else:
+            num_rpn_groups = 0
+        # normalize bbox and collate ground truth (gt)
+        gt_labels_list = []
+        gt_bboxes_list = []
+        for sample in batch_data_samples:
+            # norm and regularized
+            img_h, img_w = sample.img_shape
+            bboxes = RotatedBoxes(copy.deepcopy(sample.gt_instances.bboxes).regularize_boxes(self.angle_version))
+            # factor = bboxes.new_tensor([img_w, img_h, img_w, img_h, 1]).unsqueeze(0)
+            bboxes_normalized = bboxes.rescale_((float(1 / img_w), float(1 / img_h)))
+            gt_bboxes_list.append(bboxes_normalized)
+            gt_labels_list.append(sample.gt_instances.labels)
+        gt_labels = torch.cat(gt_labels_list)  # (num_target_total, 4)
+        gt_bboxes = torch.cat(gt_bboxes_list)
+
+        num_target_list = [len(bboxes) for bboxes in gt_bboxes_list]
+        max_num_target = max(num_target_list)
+        num_groups = self.get_num_groups(max_num_target)
+
+        dn_label_query = self.generate_dn_label_query(gt_labels, num_groups)  # [num_targets * num_groups * 2, 256]
+        dn_bbox_query = self.generate_dn_bbox_query(gt_bboxes, num_groups)  # [num_targets * num_groups * 2, 4]
+
+        # The `batch_idx` saves the batch index of the corresponding sample
+        # for each target, has shape (num_target_total).
+        batch_idx = torch.cat([torch.full_like(t.long(), i) for i, t in enumerate(gt_labels_list)])  # [num_targets]
+        dn_label_query, dn_bbox_query = self.collate_dn_queries(  # 按照batch 收集
+            dn_label_query, dn_bbox_query, batch_idx, len(batch_data_samples),
+            num_groups)  # [bs, max_num_target * num_groups * 2, 256], [bs, max_num_target * num_groups * 2, 4]
+        # rpn noised
+        if num_rpn_groups:
+            dn_label_query = torch.cat((dn_label_query, noised_rpn_label_embed), 1)
+            dn_bbox_query = torch.cat((dn_bbox_query, inverse_sigmoid(noised_rpn_box, eps=1e-3)), 1)
+
+        num_groups += num_rpn_groups
+        attn_mask = self.generate_dn_mask(  # [max_num_target * num_groups * 2 + num_querys, max_num_target * num_groups * 2 + num_querys)
+            max_num_target,
+            num_groups,
+            device=dn_label_query.device,
+            rpn_noise_flag=self.rpn_noise_flag,
+            num_rpn_groups=num_rpn_groups)
+
+        dn_meta = dict(num_denoising_queries=int(max_num_target * 2 * num_groups), num_denoising_groups=num_groups)
+
+        return dn_label_query, dn_bbox_query, attn_mask, dn_meta
+
+    def generate_dn_bbox_query(self, gt_bboxes: Tensor, num_groups: int) -> Tensor:
+        assert self.box_noise_scale > 0
+        device = gt_bboxes.device
+        # xywhr
+        gt_bboxes, gt_bboxes_rot = torch.split(gt_bboxes, (4, 1), dim=-1)
+
+        # expand gt_bboxes as groups
+        gt_bboxes_expand = gt_bboxes.repeat(2 * num_groups, 1)  # xywh
+        gt_bboxes_expand_rot = gt_bboxes_rot.repeat(2 * num_groups, 1)  # r
+
+        # obtain index of negative queries in gt_bboxes_expand
+        positive_idx = torch.arange(len(gt_bboxes), dtype=torch.long, device=device)
+        positive_idx = positive_idx.unsqueeze(0).repeat(num_groups, 1)
+        positive_idx += 2 * len(gt_bboxes) * torch.arange(num_groups, dtype=torch.long, device=device)[:, None]
+        positive_idx = positive_idx.flatten()
+        negative_idx = positive_idx + len(gt_bboxes)
+
+        # determine the sign of each element in the random part of the added
+        # noise to be positive or negative randomly.
+        rand_sign = torch.randint_like(
+            torch.cat((gt_bboxes_expand, gt_bboxes_expand_rot),
+                      dim=-1), low=0, high=2, dtype=torch.float32) * 2.0 - 1.0  # [low, high), 1 or -1, randomly
+
+        # calculate the random part of the added noise
+        rand_part = torch.rand_like(rand_sign)  # [0, 1)
+        rand_part[negative_idx] += 1.0  # pos: [0, 1); neg: [1, 2)
+        rand_part *= rand_sign  # pos: (-1, 1); neg: (-2, -1] U [1, 2)
+
+        # add noise to the bboxes
+        bboxes_whwh = gt_bboxes_expand[:, 2:].repeat(1, 2)
+        noisy_bboxes_expand_delta = torch.mul(rand_part[:, :4], bboxes_whwh) * self.box_noise_scale / 2  # xywh
+        wh_ratio_min = torch.min(gt_bboxes_expand[:, 2:3] / gt_bboxes_expand[:, 3:4],
+                                 gt_bboxes_expand[:, 3:4] / gt_bboxes_expand[:, 2:3])
+        # for suqare
+        # noisy_bboxes_expand_rot_delta = rand_part[:, 4:] * np.pi / 4 * (1 - wh_ratio_min * 0.5)
+        noisy_bboxes_expand_rot_delta = rand_part[:, 4:] * np.pi / 4
+
+        noisy_bboxes_expand = self.bbox_coder.decode(
+            torch.cat((gt_bboxes_expand, gt_bboxes_expand_rot), -1),
+            torch.cat((noisy_bboxes_expand_delta, noisy_bboxes_expand_rot_delta), -1))
+
+        noisy_bboxes_expand = inverse_rot_coord_sigmoid(noisy_bboxes_expand, self.angle_version)
+
+        return noisy_bboxes_expand.to(device)
+
+    def collate_dn_queries(self, input_label_query: Tensor, input_bbox_query: Tensor, batch_idx: Tensor,
+                           batch_size: int, num_groups: int) -> Tuple[Tensor]:
+
+        device = input_label_query.device
+        num_target_list = [torch.sum(batch_idx == idx) for idx in range(batch_size)]
+        max_num_target = max(num_target_list)
+        num_denoising_queries = int(max_num_target * 2 * num_groups)
+
+        map_query_index = torch.cat([torch.arange(num_target, device=device) for num_target in num_target_list])
+        map_query_index = torch.cat([map_query_index + max_num_target * i for i in range(2 * num_groups)]).long()
+        batch_idx_expand = batch_idx.repeat(2 * num_groups, 1).view(-1)
+        mapper = (batch_idx_expand, map_query_index)
+
+        batched_label_query = torch.zeros(batch_size, num_denoising_queries, self.embed_dims, device=device)
+        batched_bbox_query = torch.zeros(batch_size, num_denoising_queries, 5, device=device)
+
+        batched_label_query[mapper] = input_label_query
+        batched_bbox_query[mapper] = input_bbox_query
+        return batched_label_query, batched_bbox_query

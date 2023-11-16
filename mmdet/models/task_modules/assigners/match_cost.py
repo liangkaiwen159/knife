@@ -8,8 +8,42 @@ from mmengine.structures import InstanceData
 from torch import Tensor
 
 from mmdet.registry import TASK_UTILS
-from mmdet.structures.bbox import bbox_overlaps, bbox_xyxy_to_cxcywh
+from mmdet.structures.bbox import bbox_overlaps, bbox_xyxy_to_cxcywh, RotatedBoxes, get_box_tensor
+from mmdet.structures.bbox.transforms import norm_angle
+from mmcv.ops import diff_iou_rotated_2d, box_iou_quadri, box_iou_rotated
 
+import copy
+from typing import Tuple
+
+def resize_rot_bbox_tensor(boxes, scale_factor: Tuple[float, float]):
+        """Rescale boxes w.r.t. rescale_factor in-place.
+
+        Note:
+            Both ``rescale_`` and ``resize_`` will enlarge or shrink boxes
+            w.r.t ``scale_facotr``. The difference is that ``resize_`` only
+            changes the width and the height of boxes, but ``rescale_`` also
+            rescales the box centers simultaneously.
+
+        Args:
+            scale_factor (Tuple[float, float]): factors for scaling boxes.
+                The length should be 2.
+        """
+        assert len(scale_factor) == 2
+        scale_x, scale_y = scale_factor
+        ctrs, w, h, t = torch.split(boxes, [2, 1, 1, 1], dim=-1)
+        cos_value, sin_value = torch.cos(t), torch.sin(t)
+
+        # Refer to https://github.com/facebookresearch/detectron2/blob/main/detectron2/structures/rotated_boxes.py # noqa
+        # rescale centers
+        ctrs = ctrs * ctrs.new_tensor([scale_x, scale_y])
+        # rescale width and height
+        w = w * torch.sqrt((scale_x * cos_value)**2 + (scale_y * sin_value)**2)
+        h = h * torch.sqrt((scale_x * sin_value)**2 + (scale_y * cos_value)**2)
+        # recalculate theta
+        t = torch.atan2(scale_x * sin_value, scale_y * cos_value)
+        boxes = torch.cat([ctrs, w, h, t], dim=-1)
+
+        return boxes
 
 class BaseMatchCost:
     """Base match cost class.
@@ -72,9 +106,7 @@ class BBoxL1Cost(BaseMatchCost):
         tensor([[1.6172, 1.6422]])
     """
 
-    def __init__(self,
-                 box_format: str = 'xyxy',
-                 weight: Union[float, int] = 1.) -> None:
+    def __init__(self, box_format: str = 'xyxy', weight: Union[float, int] = 1.) -> None:
         super().__init__(weight=weight)
         assert box_format in ['xyxy', 'xywh']
         self.box_format = box_format
@@ -107,8 +139,7 @@ class BBoxL1Cost(BaseMatchCost):
 
         # normalized
         img_h, img_w = img_meta['img_shape']
-        factor = gt_bboxes.new_tensor([img_w, img_h, img_w,
-                                       img_h]).unsqueeze(0)
+        factor = gt_bboxes.new_tensor([img_w, img_h, img_w, img_h]).unsqueeze(0)
         gt_bboxes = gt_bboxes / factor
         pred_bboxes = pred_bboxes / factor
 
@@ -271,10 +302,8 @@ class FocalLossCost(BaseMatchCost):
             torch.Tensor: cls_cost value with weight
         """
         cls_pred = cls_pred.sigmoid()
-        neg_cost = -(1 - cls_pred + self.eps).log() * (
-            1 - self.alpha) * cls_pred.pow(self.gamma)
-        pos_cost = -(cls_pred + self.eps).log() * self.alpha * (
-            1 - cls_pred).pow(self.gamma)
+        neg_cost = -(1 - cls_pred + self.eps).log() * (1 - self.alpha) * cls_pred.pow(self.gamma)
+        pos_cost = -(cls_pred + self.eps).log() * self.alpha * (1 - cls_pred).pow(self.gamma)
 
         cls_cost = pos_cost[:, gt_labels] - neg_cost[:, gt_labels]
         return cls_cost * self.weight
@@ -295,10 +324,8 @@ class FocalLossCost(BaseMatchCost):
         gt_labels = gt_labels.flatten(1).float()
         n = cls_pred.shape[1]
         cls_pred = cls_pred.sigmoid()
-        neg_cost = -(1 - cls_pred + self.eps).log() * (
-            1 - self.alpha) * cls_pred.pow(self.gamma)
-        pos_cost = -(cls_pred + self.eps).log() * self.alpha * (
-            1 - cls_pred).pow(self.gamma)
+        neg_cost = -(1 - cls_pred + self.eps).log() * (1 - self.alpha) * cls_pred.pow(self.gamma)
+        pos_cost = -(cls_pred + self.eps).log() * self.alpha * (1 - cls_pred).pow(self.gamma)
 
         cls_cost = torch.einsum('nc,mc->nm', pos_cost, gt_labels) + \
             torch.einsum('nc,mc->nm', neg_cost, (1 - gt_labels))
@@ -407,8 +434,7 @@ class DiceCost(BaseMatchCost):
         self.eps = eps
         self.naive_dice = naive_dice
 
-    def _binary_mask_dice_loss(self, mask_preds: Tensor,
-                               gt_masks: Tensor) -> Tensor:
+    def _binary_mask_dice_loss(self, mask_preds: Tensor, gt_masks: Tensor) -> Tensor:
         """
         Args:
             mask_preds (Tensor): Mask prediction in shape (num_queries, *).
@@ -467,14 +493,11 @@ class CrossEntropyLossCost(BaseMatchCost):
         weight (Union[float, int]): Cost weight. Defaults to 1.
     """
 
-    def __init__(self,
-                 use_sigmoid: bool = True,
-                 weight: Union[float, int] = 1.) -> None:
+    def __init__(self, use_sigmoid: bool = True, weight: Union[float, int] = 1.) -> None:
         super().__init__(weight=weight)
         self.use_sigmoid = use_sigmoid
 
-    def _binary_cross_entropy(self, cls_pred: Tensor,
-                              gt_labels: Tensor) -> Tensor:
+    def _binary_cross_entropy(self, cls_pred: Tensor, gt_labels: Tensor) -> Tensor:
         """
         Args:
             cls_pred (Tensor): The prediction with shape (num_queries, 1, *) or
@@ -488,10 +511,8 @@ class CrossEntropyLossCost(BaseMatchCost):
         cls_pred = cls_pred.flatten(1).float()
         gt_labels = gt_labels.flatten(1).float()
         n = cls_pred.shape[1]
-        pos = F.binary_cross_entropy_with_logits(
-            cls_pred, torch.ones_like(cls_pred), reduction='none')
-        neg = F.binary_cross_entropy_with_logits(
-            cls_pred, torch.zeros_like(cls_pred), reduction='none')
+        pos = F.binary_cross_entropy_with_logits(cls_pred, torch.ones_like(cls_pred), reduction='none')
+        neg = F.binary_cross_entropy_with_logits(cls_pred, torch.zeros_like(cls_pred), reduction='none')
         cls_cost = torch.einsum('nc,mc->nm', pos, gt_labels) + \
             torch.einsum('nc,mc->nm', neg, 1 - gt_labels)
         cls_cost = cls_cost / n
@@ -523,3 +544,121 @@ class CrossEntropyLossCost(BaseMatchCost):
             raise NotImplementedError
 
         return cls_cost * self.weight
+
+
+@TASK_UTILS.register_module()
+class RBBoxL1Cost(BaseMatchCost):
+
+    def __init__(self,
+                 box_format: str = 'cxcywhr',
+                 angle_version: str = 'le90',
+                 wh_ratio_weight: float = 2.0,
+                 use_normal_l1: bool = False,
+                 weight: Union[float, int] = 1.) -> None:
+        super().__init__(weight=weight)
+        assert box_format in {'cxcywhr'}
+        assert angle_version in {'oc', 'le90', 'le135', 'r360'}
+        self.box_format = box_format
+        self.angle_version = angle_version
+        self.wh_ratio_weight = wh_ratio_weight
+        self.use_normal_l1 = use_normal_l1
+
+    def __call__(self,
+                 pred_instances: InstanceData,
+                 gt_instances: InstanceData,
+                 img_meta: Optional[dict] = None,
+                 **kwargs) -> Tensor:
+        """Compute match cost.
+
+        Args:
+            pred_instances (:obj:`InstanceData`): ``bboxes`` inside is
+                predicted boxes with unnormalized coordinate
+                (x, y, x, y).
+            gt_instances (:obj:`InstanceData`): ``bboxes`` inside is gt
+                bboxes with unnormalized coordinate (x, y, x, y).
+            img_meta (Optional[dict]): Image information. Defaults to None.
+
+        Returns:
+            Tensor: Match Cost matrix of shape (num_preds, num_gts).
+        """
+        pred_bboxes = pred_instances.bboxes
+        gt_bboxes = gt_instances.bboxes.tensor
+        img_h, img_w = img_meta['img_shape']
+
+        # assert isinstance(gt_bboxes, RotatedBoxes)
+        gt_bboxes = resize_rot_bbox_tensor(gt_bboxes, (1 / float(img_w), 1 / float(img_h)))
+        # assert isinstance(pred_bboxes, RotatedBoxes)
+        pred_bboxes = resize_rot_bbox_tensor(pred_bboxes, (1 / float(img_w), 1 / float(img_h)))
+        assert isinstance(pred_bboxes, Tensor)
+        assert isinstance(gt_bboxes, Tensor)
+        assert pred_bboxes.shape[-1] == 5
+        assert gt_bboxes.shape[-1] == 5
+
+        nums_gt = gt_bboxes.shape[0]
+        nums_pred = pred_bboxes.shape[0]
+
+        pred_bboxes_coord, pred_bboxes_rot = torch.split(pred_bboxes, (4, 1), dim=-1)
+        gt_bboxes_coord, gt_bboxes_rot = torch.split(gt_bboxes, (4, 1), dim=-1)
+
+        # cal cost
+        if self.use_normal_l1:
+            bbox_cost = torch.cdist(torch.cat((pred_bboxes_coord, pred_bboxes_rot), dim=-1),
+                                    torch.cat((gt_bboxes_coord, gt_bboxes_rot), dim=-1),
+                                    p=1)
+        else:
+            # repeat for cost matrix
+            pred_bboxes_rot = pred_bboxes_rot.repeat(1, nums_gt)
+            gt_bboxes_rot = gt_bboxes_rot.permute(1, 0).repeat(nums_pred, 1)
+
+            bbox_cost = torch.cdist(pred_bboxes_coord, gt_bboxes_coord, p=1)
+            wh_ratio_min = torch.min(pred_bboxes_coord[:, 2:3] / pred_bboxes_coord[:, 3:4],
+                                     pred_bboxes_coord[:, 3:4] / pred_bboxes_coord[:, 2:3]).repeat(1, nums_gt)
+            r_cost = (pred_bboxes_rot.tan() - gt_bboxes_rot.tan())**2 / (
+                1 + pred_bboxes_rot.tan()**2 + gt_bboxes_rot.tan()**2) * (1.5 - wh_ratio_min) * self.wh_ratio_weight
+            bbox_cost += r_cost
+        return bbox_cost * self.weight
+
+
+@TASK_UTILS.register_module()
+class RotatedIoUCost(BaseMatchCost):
+
+    def __init__(self, weight: Union[float, int] = 1., angle_version: str = 'le90', eps=1e-6, reduction='mean'):
+        super().__init__(weight=weight)
+        self.eps = eps
+        self.reduction = reduction
+        self.angle_version = angle_version
+
+    def __call__(self,
+                 pred_instances: InstanceData,
+                 gt_instances: InstanceData,
+                 img_meta: Optional[dict] = None,
+                 **kwargs):
+
+        pred_bboxes = pred_instances.bboxes
+        gt_bboxes = gt_instances.bboxes
+        if isinstance(gt_bboxes, RotatedBoxes):
+            gt_bboxes = get_box_tensor(gt_bboxes)
+        if isinstance(pred_bboxes, RotatedBoxes):
+            pred_bboxes = get_box_tensor(pred_bboxes)
+        assert isinstance(pred_bboxes, Tensor)
+        assert isinstance(gt_bboxes, Tensor)
+        assert pred_bboxes.shape[-1] == 5
+        assert gt_bboxes.shape[-1] == 5
+
+        nums_gt = gt_bboxes.shape[0]
+        nums_pred = pred_bboxes.shape[0]
+
+        # pred_bboxes = pred_bboxes[:, None].repeat(1, nums_gt, 1).reshape(-1, 5)
+        # gt_bboxes = gt_bboxes[None].repeat(nums_pred, 1, 1).reshape(-1, 5)
+        # ious = diff_iou_rotated_2d(pred_bboxes.unsqueeze(0), gt_bboxes.unsqueeze(0))
+        ious = box_iou_rotated(pred_bboxes, gt_bboxes)
+        ious = ious.squeeze(0).clamp(min=self.eps).reshape(nums_pred, nums_gt)
+
+        return -self.weight * ious
+        pred_bboxes = pred_instances.bboxes
+        gt_bboxes = gt_instances.bboxes
+
+        overlaps = rotated_iou_loss(pred_bboxes, gt_bboxes, mode=self.mode, is_aligned=False)
+        # The 1 is a constant that doesn't change the matching, so omitted.
+        iou_cost = -overlaps
+        return iou_cost * self.weight

@@ -49,7 +49,6 @@ class DeformableDETR(DetectionTransformer):
         self.with_box_refine = with_box_refine
         self.as_two_stage = as_two_stage
         self.num_feature_levels = num_feature_levels
-
         if bbox_head is not None:
             assert 'share_pred_layer' not in bbox_head and \
                    'num_pred_layer' not in bbox_head and \
@@ -64,6 +63,7 @@ class DeformableDETR(DetectionTransformer):
             bbox_head['share_pred_layer'] = not with_box_refine
             bbox_head['num_pred_layer'] = (decoder['num_layers'] + 1) \
                 if self.as_two_stage else decoder['num_layers']
+                # if self.as_two_stage and not getattr(self,'use_rpn',False) else decoder['num_layers']
             bbox_head['as_two_stage'] = as_two_stage
 
         super().__init__(*args, decoder=decoder, bbox_head=bbox_head, **kwargs)

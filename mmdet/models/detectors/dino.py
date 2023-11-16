@@ -8,10 +8,12 @@ from torch.nn.init import normal_
 from mmdet.registry import MODELS
 from mmdet.structures import OptSampleList
 from mmdet.utils import OptConfigType
-from ..layers import (CdnQueryGenerator, DeformableDetrTransformerEncoder,
+from ..layers import (CdnQueryGenerator, CdnQueryGenerator_rpn, DeformableDetrTransformerEncoder,
                       DinoTransformerDecoder, SinePositionalEncoding)
 from .deformable_detr import DeformableDETR, MultiScaleDeformableAttention
-
+from mmdet.structures.bbox import bbox_cxcywh_to_xyxy, bbox_xyxy_to_cxcywh
+from mmdet.models.utils import unpack_gt_instances, multi_apply
+from mmengine.structures import InstanceData
 
 @MODELS.register_module()
 class DINO(DeformableDETR):
@@ -26,11 +28,12 @@ class DINO(DeformableDETR):
             query generator. Defaults to `None`.
     """
 
-    def __init__(self, *args, dn_cfg: OptConfigType = None, **kwargs) -> None:
+    def __init__(self, *args, encoder_reasign=False, dn_cfg: OptConfigType = None, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         assert self.as_two_stage, 'as_two_stage must be True for DINO'
         assert self.with_box_refine, 'with_box_refine must be True for DINO'
-
+        self.encoder_reasign_match_costs = self.bbox_head.assigner.match_costs
+        self.encoder_reasign = encoder_reasign
         if dn_cfg is not None:
             assert 'num_classes' not in dn_cfg and \
                    'num_queries' not in dn_cfg and \
@@ -41,12 +44,16 @@ class DINO(DeformableDETR):
             dn_cfg['num_classes'] = self.bbox_head.num_classes
             dn_cfg['embed_dims'] = self.embed_dims
             dn_cfg['num_matching_queries'] = self.num_queries
-        self.dn_query_generator = CdnQueryGenerator(**dn_cfg)
-
+            if getattr(self, 'use_rpn', None):
+                self.dn_query_generator = CdnQueryGenerator_rpn(**dn_cfg)
+            else:
+                if 'rpn_noise_flag' in dn_cfg:
+                    dn_cfg.pop('rpn_noise_flag')
+                self.dn_query_generator = CdnQueryGenerator(**dn_cfg)
+                
     def _init_layers(self) -> None:
         """Initialize layers except for backbone, neck and bbox_head."""
-        self.positional_encoding = SinePositionalEncoding(
-            **self.positional_encoding)
+        self.positional_encoding = SinePositionalEncoding(**self.positional_encoding)
         self.encoder = DeformableDetrTransformerEncoder(**self.encoder)
         self.decoder = DinoTransformerDecoder(**self.decoder)
         self.embed_dims = self.encoder.embed_dims
@@ -61,8 +68,7 @@ class DINO(DeformableDETR):
             f'embed_dims should be exactly 2 times of num_feats. ' \
             f'Found {self.embed_dims} and {num_feats}.'
 
-        self.level_embed = nn.Parameter(
-            torch.Tensor(self.num_feature_levels, self.embed_dims))
+        self.level_embed = nn.Parameter(torch.Tensor(self.num_feature_levels, self.embed_dims))
         self.memory_trans_fc = nn.Linear(self.embed_dims, self.embed_dims)
         self.memory_trans_norm = nn.LayerNorm(self.embed_dims)
 
@@ -110,13 +116,11 @@ class DINO(DeformableDETR):
             includes the `hidden_states` of the decoder output and may contain
             `references` including the initial and intermediate references.
         """
-        encoder_inputs_dict, decoder_inputs_dict = self.pre_transformer(
-            img_feats, batch_data_samples)
+        encoder_inputs_dict, decoder_inputs_dict = self.pre_transformer(img_feats, batch_data_samples)
 
         encoder_outputs_dict = self.forward_encoder(**encoder_inputs_dict)
 
-        tmp_dec_in, head_inputs_dict = self.pre_decoder(
-            **encoder_outputs_dict, batch_data_samples=batch_data_samples)
+        tmp_dec_in, head_inputs_dict = self.pre_decoder(**encoder_outputs_dict, batch_data_samples=batch_data_samples)
         decoder_inputs_dict.update(tmp_dec_in)
 
         decoder_outputs_dict = self.forward_decoder(**decoder_inputs_dict)
@@ -160,29 +164,24 @@ class DINO(DeformableDETR):
               and `dn_meta` when `self.training` is `True`, else is empty.
         """
         bs, _, c = memory.shape
-        cls_out_features = self.bbox_head.cls_branches[
-            self.decoder.num_layers].out_features
+        cls_out_features = self.bbox_head.cls_branches[self.decoder.num_layers].out_features
 
-        output_memory, output_proposals = self.gen_encoder_output_proposals(
-            memory, memory_mask, spatial_shapes)
-        enc_outputs_class = self.bbox_head.cls_branches[
-            self.decoder.num_layers](
-                output_memory)
-        enc_outputs_coord_unact = self.bbox_head.reg_branches[
-            self.decoder.num_layers](output_memory) + output_proposals
+        output_memory, output_proposals = self.gen_encoder_output_proposals(memory, memory_mask, spatial_shapes)
+        enc_outputs_class = self.bbox_head.cls_branches[self.decoder.num_layers](output_memory)
+        enc_outputs_coord_unact = self.bbox_head.reg_branches[self.decoder.num_layers](output_memory) + output_proposals
 
         # NOTE The DINO selects top-k proposals according to scores of
         # multi-class classification, while DeformDETR, where the input
         # is `enc_outputs_class[..., 0]` selects according to scores of
         # binary classification.
-        topk_indices = torch.topk(
-            enc_outputs_class.max(-1)[0], k=self.num_queries, dim=1)[1]
-        topk_score = torch.gather(
-            enc_outputs_class, 1,
-            topk_indices.unsqueeze(-1).repeat(1, 1, cls_out_features))
-        topk_coords_unact = torch.gather(
-            enc_outputs_coord_unact, 1,
-            topk_indices.unsqueeze(-1).repeat(1, 1, 4))
+        if not self.encoder_reasign:
+            topk_indices = torch.topk(enc_outputs_class.max(-1)[0], k=self.num_queries, dim=1)[1]
+        else:
+            topk_indices = self.asign_encoder_output(enc_outputs_class, enc_outputs_coord_unact,
+                                                     batch_data_samples).permute(1, 0).to(enc_outputs_class.device)
+        # topk_indices = torch.topk(enc_outputs_class.max(-1)[0], k=self.num_queries, dim=1)[1]
+        topk_score = torch.gather(enc_outputs_class, 1, topk_indices.unsqueeze(-1).repeat(1, 1, cls_out_features))
+        topk_coords_unact = torch.gather(enc_outputs_coord_unact, 1, topk_indices.unsqueeze(-1).repeat(1, 1, 4))
         topk_coords = topk_coords_unact.sigmoid()
         topk_coords_unact = topk_coords_unact.detach()
 
@@ -192,25 +191,18 @@ class DINO(DeformableDETR):
             dn_label_query, dn_bbox_query, dn_mask, dn_meta = \
                 self.dn_query_generator(batch_data_samples)
             query = torch.cat([dn_label_query, query], dim=1)
-            reference_points = torch.cat([dn_bbox_query, topk_coords_unact],
-                                         dim=1)
+            reference_points = torch.cat([dn_bbox_query, topk_coords_unact], dim=1)
         else:
             reference_points = topk_coords_unact
             dn_mask, dn_meta = None, None
         reference_points = reference_points.sigmoid()
 
-        decoder_inputs_dict = dict(
-            query=query,
-            memory=memory,
-            reference_points=reference_points,
-            dn_mask=dn_mask)
+        decoder_inputs_dict = dict(query=query, memory=memory, reference_points=reference_points, dn_mask=dn_mask)
         # NOTE DINO calculates encoder losses on scores and coordinates
         # of selected top-k encoder queries, while DeformDETR is of all
         # encoder queries.
-        head_inputs_dict = dict(
-            enc_outputs_class=topk_score,
-            enc_outputs_coord=topk_coords,
-            dn_meta=dn_meta) if self.training else dict()
+        head_inputs_dict = dict(enc_outputs_class=topk_score, enc_outputs_coord=topk_coords,
+                                dn_meta=dn_meta) if self.training else dict()
         return decoder_inputs_dict, head_inputs_dict
 
     def forward_decoder(self,
@@ -282,6 +274,44 @@ class DINO(DeformableDETR):
             inter_states[0] += \
                 self.dn_query_generator.label_embedding.weight[0, 0] * 0.0
 
-        decoder_outputs_dict = dict(
-            hidden_states=inter_states, references=list(references))
+        decoder_outputs_dict = dict(hidden_states=inter_states, references=list(references))
         return decoder_outputs_dict
+    
+    def asign_encoder_output(self, enc_outputs_class: Tensor, enc_outputs_coord_unact: Tensor, batch_data_samples):
+        if isinstance(batch_data_samples, list):
+            batch_gt_instances, batch_gt_instances_ignore, batch_img_metas = unpack_gt_instances(batch_data_samples)
+        else:
+            batch_gt_instances = batch_data_samples['bboxes_labels']
+            batch_img_metas = batch_data_samples['img_metas']
+            batch_gt_instances_ignore = None
+
+        chose_topk_indices = multi_apply(self.asign_encoder_output_single, batch_gt_instances, enc_outputs_class,
+                                         enc_outputs_coord_unact, batch_img_metas)
+        return torch.tensor(chose_topk_indices)
+
+    def asign_encoder_output_single(self, gt_instances, enc_output_class: Tensor, enc_output_coord_unact: Tensor,
+                                    img_meta):
+        assert isinstance(gt_instances.labels, Tensor)
+
+        enc_output_coord_act = enc_output_coord_unact.sigmoid()
+
+        img_h, img_w = img_meta['img_shape']
+        factor = enc_output_coord_act.new_tensor([img_w, img_h, img_w, img_h]).unsqueeze(0).repeat(enc_output_coord_act.size(0), 1)
+        # convert bbox_pred from xywh, normalized to xyxy, unnormalized
+        bbox_pred = bbox_cxcywh_to_xyxy(enc_output_coord_act) * factor
+
+        pred_instances = InstanceData(scores=enc_output_class, bboxes=bbox_pred)
+        num_gts, num_preds = len(gt_instances), len(pred_instances)
+
+        if num_gts == 0 or num_preds == 0:
+            # print(f'num_gts: {num_gts}, num_preds: {num_preds}')
+            return torch.argsort(enc_output_class.min(-1)[0])[:self.num_queries]
+
+        # 2. compute weighted cost
+        cost_list = []
+        for match_cost in self.encoder_reasign_match_costs:
+            cost = match_cost(pred_instances=pred_instances, gt_instances=gt_instances, img_meta=img_meta)
+            cost_list.append(cost)
+        cost = torch.stack(cost_list).sum(dim=0)
+        cost_cross_pred = cost.sum(dim=1)
+        return torch.argsort(cost_cross_pred)[:self.num_queries]

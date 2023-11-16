@@ -61,9 +61,11 @@ class ChannelMapper(BaseModule):
         bias: Union[bool, str] = 'auto',
         num_outs: int = None,
         init_cfg: OptMultiConfig = dict(
-            type='Xavier', layer='Conv2d', distribution='uniform')
+            type='Xavier', layer='Conv2d', distribution='uniform'),
+        return_tuple = False
     ) -> None:
         super().__init__(init_cfg=init_cfg)
+        self.return_tuple = return_tuple
         assert isinstance(in_channels, list)
         self.extra_convs = None
         if num_outs is None:
@@ -109,4 +111,4 @@ class ChannelMapper(BaseModule):
                     outs.append(self.extra_convs[0](inputs[-1]))
                 else:
                     outs.append(self.extra_convs[i](outs[-1]))
-        return tuple(outs)
+        return (tuple(outs), tuple(outs)) if self.return_tuple else tuple(outs)

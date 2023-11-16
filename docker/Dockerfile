@@ -1,8 +1,9 @@
-ARG PYTORCH="1.9.0"
-ARG CUDA="11.1"
+ARG PYTORCH="1.10.0"
+ARG CUDA="11.3"
 ARG CUDNN="8"
 
 FROM pytorch/pytorch:${PYTORCH}-cuda${CUDA}-cudnn${CUDNN}-devel
+# FROM nvidia/cuda:11.3.0-devel-ubuntu20.04
 
 ENV TORCH_CUDA_ARCH_LIST="6.0 6.1 7.0 7.5 8.0 8.6+PTX" \
     TORCH_NVCC_FLAGS="-Xfatbin -compress-all" \
@@ -18,8 +19,8 @@ RUN rm /etc/apt/sources.list.d/cuda.list \
     && apt-key adv --fetch-keys https://developer.download.nvidia.com/compute/machine-learning/repos/ubuntu1804/x86_64/7fa2af80.pub
 
 # (Optional, use Mirror to speed up downloads)
-# RUN sed -i 's/http:\/\/archive.ubuntu.com\/ubuntu\//http:\/\/mirrors.aliyun.com\/ubuntu\//g' /etc/apt/sources.list && \
-#    pip config set global.index-url https://pypi.tuna.tsinghua.edu.cn/simple
+RUN sed -i 's/http:\/\/archive.ubuntu.com\/ubuntu\//http:\/\/mirrors.aliyun.com\/ubuntu\//g' /etc/apt/sources.list && \
+   pip config set global.index-url https://pypi.tuna.tsinghua.edu.cn/simple
 
 # Install the required packages
 RUN apt-get update \
@@ -36,5 +37,4 @@ RUN conda clean --all \
     && git clone https://github.com/open-mmlab/mmdetection.git /mmdetection \
     && cd /mmdetection \
     && pip install --no-cache-dir -e .
-
 WORKDIR /mmdetection

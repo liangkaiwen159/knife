@@ -42,7 +42,7 @@ train_dataloader = dict(
     batch_sampler=dict(type='AspectRatioBatchSampler'),
     dataset=dict(
         type='RepeatDataset',
-        times=3,
+        times=1,
         dataset=dict(
             type='ConcatDataset',
             # VOCDataset will add different `dataset_type` in dataset.metainfo,

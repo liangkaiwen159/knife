@@ -5,12 +5,12 @@ from typing import Optional, Sequence, Tuple, Union
 
 import torch
 import torch.nn.functional as F
-from mmcv.cnn import (Linear, build_activation_layer, build_conv_layer,
-                      build_norm_layer)
+from mmcv.cnn import (Linear, build_activation_layer, build_conv_layer, build_norm_layer)
 from mmcv.cnn.bricks.drop import Dropout
 from mmengine.model import BaseModule, ModuleList
 from mmengine.utils import to_2tuple
 from torch import Tensor, nn
+import numpy as np
 
 from mmdet.registry import MODELS
 from mmdet.utils import OptConfigType, OptMultiConfig
@@ -66,34 +66,28 @@ def coordinate_to_encoding(coord_tensor: Tensor,
     Returns:
         Tensor: Returned encoded positional tensor.
     """
-    dim_t = torch.arange(
-        num_feats, dtype=torch.float32, device=coord_tensor.device)
+    dim_t = torch.arange(num_feats, dtype=torch.float32, device=coord_tensor.device)
     dim_t = temperature**(2 * (dim_t // 2) / num_feats)
     x_embed = coord_tensor[..., 0] * scale
     y_embed = coord_tensor[..., 1] * scale
     pos_x = x_embed[..., None] / dim_t
     pos_y = y_embed[..., None] / dim_t
-    pos_x = torch.stack((pos_x[..., 0::2].sin(), pos_x[..., 1::2].cos()),
-                        dim=-1).flatten(2)
-    pos_y = torch.stack((pos_y[..., 0::2].sin(), pos_y[..., 1::2].cos()),
-                        dim=-1).flatten(2)
+    pos_x = torch.stack((pos_x[..., 0::2].sin(), pos_x[..., 1::2].cos()), dim=-1).flatten(2)
+    pos_y = torch.stack((pos_y[..., 0::2].sin(), pos_y[..., 1::2].cos()), dim=-1).flatten(2)
     if coord_tensor.size(-1) == 2:
         pos = torch.cat((pos_y, pos_x), dim=-1)
-    elif coord_tensor.size(-1) == 4:
+    elif coord_tensor.size(-1) in [4, 5]:
         w_embed = coord_tensor[..., 2] * scale
         pos_w = w_embed[..., None] / dim_t
-        pos_w = torch.stack((pos_w[..., 0::2].sin(), pos_w[..., 1::2].cos()),
-                            dim=-1).flatten(2)
+        pos_w = torch.stack((pos_w[..., 0::2].sin(), pos_w[..., 1::2].cos()), dim=-1).flatten(2)
 
         h_embed = coord_tensor[..., 3] * scale
         pos_h = h_embed[..., None] / dim_t
-        pos_h = torch.stack((pos_h[..., 0::2].sin(), pos_h[..., 1::2].cos()),
-                            dim=-1).flatten(2)
+        pos_h = torch.stack((pos_h[..., 0::2].sin(), pos_h[..., 1::2].cos()), dim=-1).flatten(2)
 
         pos = torch.cat((pos_y, pos_x, pos_w, pos_h), dim=-1)
     else:
-        raise ValueError('Unknown pos_tensor shape(-1):{}'.format(
-            coord_tensor.size(-1)))
+        raise ValueError('Unknown pos_tensor shape(-1):{}'.format(coord_tensor.size(-1)))
     return pos
 
 
@@ -111,6 +105,35 @@ def inverse_sigmoid(x: Tensor, eps: float = 1e-5) -> Tensor:
     x1 = x.clamp(min=eps)
     x2 = (1 - x).clamp(min=eps)
     return torch.log(x1 / x2)
+
+
+def act_rot_sigmoid(x: Tensor, angle_version: str = 'le90') -> Tensor:
+    assert angle_version in {'le90', 'le135'}
+    x = x.sigmoid()
+    if angle_version == 'le90':
+        return np.pi * x - np.pi / 2
+    elif angle_version == 'le135':
+        return np.pi * x - np.pi / 4
+
+
+def inverse_act_rot_sigmoid(x: Tensor, angle_version: str = 'le90', eps: float = 1e-3) -> Tensor:
+    assert angle_version in {'le90', 'le135'}
+    if angle_version == 'le90':
+        return inverse_sigmoid(x / np.pi + 0.5, eps)
+    elif angle_version == 'le135':
+        return inverse_sigmoid(x / np.pi + 0.25, eps)
+
+
+def rot_coord_sigmoid(x: Tensor, angle_version: str = 'le90'):
+    assert x.size(-1) == 5
+    coord, rot = torch.split(x, (4, 1), -1)
+    return torch.cat((coord.sigmoid(), act_rot_sigmoid(rot, angle_version)), -1)
+
+
+def inverse_rot_coord_sigmoid(x: Tensor, angle_version: str = 'le90', eps: float = 1e-3):
+    assert x.size(-1) == 5
+    coord, rot = torch.split(x, (4, 1), -1)
+    return torch.cat((inverse_sigmoid(coord), inverse_act_rot_sigmoid(rot, angle_version, eps)), -1)
 
 
 class AdaptivePadding(nn.Module):
@@ -166,10 +189,8 @@ class AdaptivePadding(nn.Module):
         stride_h, stride_w = self.stride
         output_h = math.ceil(input_h / stride_h)
         output_w = math.ceil(input_w / stride_w)
-        pad_h = max((output_h - 1) * stride_h +
-                    (kernel_h - 1) * self.dilation[0] + 1 - input_h, 0)
-        pad_w = max((output_w - 1) * stride_w +
-                    (kernel_w - 1) * self.dilation[1] + 1 - input_w, 0)
+        pad_h = max((output_h - 1) * stride_h + (kernel_h - 1) * self.dilation[0] + 1 - input_h, 0)
+        pad_w = max((output_w - 1) * stride_w + (kernel_w - 1) * self.dilation[1] + 1 - input_w, 0)
         return pad_h, pad_w
 
     def forward(self, x):
@@ -178,10 +199,7 @@ class AdaptivePadding(nn.Module):
             if self.padding == 'corner':
                 x = F.pad(x, [0, pad_w, 0, pad_h])
             elif self.padding == 'same':
-                x = F.pad(x, [
-                    pad_w // 2, pad_w - pad_w // 2, pad_h // 2,
-                    pad_h - pad_h // 2
-                ])
+                x = F.pad(x, [pad_w // 2, pad_w - pad_w // 2, pad_h // 2, pad_h - pad_h // 2])
         return x
 
 
@@ -236,26 +254,24 @@ class PatchEmbed(BaseModule):
         dilation = to_2tuple(dilation)
 
         if isinstance(padding, str):
-            self.adap_padding = AdaptivePadding(
-                kernel_size=kernel_size,
-                stride=stride,
-                dilation=dilation,
-                padding=padding)
+            self.adap_padding = AdaptivePadding(kernel_size=kernel_size,
+                                                stride=stride,
+                                                dilation=dilation,
+                                                padding=padding)
             # disable the padding of conv
             padding = 0
         else:
             self.adap_padding = None
         padding = to_2tuple(padding)
 
-        self.projection = build_conv_layer(
-            dict(type=conv_type),
-            in_channels=in_channels,
-            out_channels=embed_dims,
-            kernel_size=kernel_size,
-            stride=stride,
-            padding=padding,
-            dilation=dilation,
-            bias=bias)
+        self.projection = build_conv_layer(dict(type=conv_type),
+                                           in_channels=in_channels,
+                                           out_channels=embed_dims,
+                                           kernel_size=kernel_size,
+                                           stride=stride,
+                                           padding=padding,
+                                           dilation=dilation,
+                                           bias=bias)
 
         if norm_cfg is not None:
             self.norm = build_norm_layer(norm_cfg, embed_dims)[1]
@@ -276,10 +292,8 @@ class PatchEmbed(BaseModule):
                 input_size = (input_h, input_w)
 
             # https://pytorch.org/docs/stable/generated/torch.nn.Conv2d.html
-            h_out = (input_size[0] + 2 * padding[0] - dilation[0] *
-                     (kernel_size[0] - 1) - 1) // stride[0] + 1
-            w_out = (input_size[1] + 2 * padding[1] - dilation[1] *
-                     (kernel_size[1] - 1) - 1) // stride[1] + 1
+            h_out = (input_size[0] + 2 * padding[0] - dilation[0] * (kernel_size[0] - 1) - 1) // stride[0] + 1
+            w_out = (input_size[1] + 2 * padding[1] - dilation[1] * (kernel_size[1] - 1) - 1) // stride[1] + 1
             self.init_out_size = (h_out, w_out)
         else:
             self.init_input_size = None
@@ -363,22 +377,17 @@ class PatchMerging(BaseModule):
         dilation = to_2tuple(dilation)
 
         if isinstance(padding, str):
-            self.adap_padding = AdaptivePadding(
-                kernel_size=kernel_size,
-                stride=stride,
-                dilation=dilation,
-                padding=padding)
+            self.adap_padding = AdaptivePadding(kernel_size=kernel_size,
+                                                stride=stride,
+                                                dilation=dilation,
+                                                padding=padding)
             # disable the padding of unfold
             padding = 0
         else:
             self.adap_padding = None
 
         padding = to_2tuple(padding)
-        self.sampler = nn.Unfold(
-            kernel_size=kernel_size,
-            dilation=dilation,
-            padding=padding,
-            stride=stride)
+        self.sampler = nn.Unfold(kernel_size=kernel_size, dilation=dilation, padding=padding, stride=stride)
 
         sample_dim = kernel_size[0] * kernel_size[1] * in_channels
 
@@ -389,8 +398,7 @@ class PatchMerging(BaseModule):
 
         self.reduction = nn.Linear(sample_dim, out_channels, bias=bias)
 
-    def forward(self, x: Tensor,
-                input_size: Tuple[int]) -> Tuple[Tensor, Tuple[int]]:
+    def forward(self, x: Tensor, input_size: Tuple[int]) -> Tuple[Tensor, Tuple[int]]:
         """
         Args:
             x (Tensor): Has shape (B, H*W, C_in).
@@ -425,11 +433,9 @@ class PatchMerging(BaseModule):
         # if kernel_size=2 and stride=2, x should has shape (B, 4*C, H/2*W/2)
 
         out_h = (H + 2 * self.sampler.padding[0] - self.sampler.dilation[0] *
-                 (self.sampler.kernel_size[0] - 1) -
-                 1) // self.sampler.stride[0] + 1
+                 (self.sampler.kernel_size[0] - 1) - 1) // self.sampler.stride[0] + 1
         out_w = (W + 2 * self.sampler.padding[1] - self.sampler.dilation[1] *
-                 (self.sampler.kernel_size[1] - 1) -
-                 1) // self.sampler.stride[1] + 1
+                 (self.sampler.kernel_size[1] - 1) - 1) // self.sampler.stride[1] + 1
 
         output_size = (out_h, out_w)
         x = x.transpose(1, 2)  # B, H/2*W/2, 4*C
@@ -567,44 +573,29 @@ class ConditionalAttention(BaseModule):
             if attn_mask.dim() == 2:
                 attn_mask = attn_mask.unsqueeze(0)
                 if list(attn_mask.size()) != [1, query.size(1), key.size(1)]:
-                    raise RuntimeError(
-                        'The size of the 2D attn_mask is not correct.')
+                    raise RuntimeError('The size of the 2D attn_mask is not correct.')
             elif attn_mask.dim() == 3:
-                if list(attn_mask.size()) != [
-                        bs * self.num_heads,
-                        query.size(1),
-                        key.size(1)
-                ]:
-                    raise RuntimeError(
-                        'The size of the 3D attn_mask is not correct.')
+                if list(attn_mask.size()) != [bs * self.num_heads, query.size(1), key.size(1)]:
+                    raise RuntimeError('The size of the 3D attn_mask is not correct.')
             else:
-                raise RuntimeError(
-                    "attn_mask's dimension {} is not supported".format(
-                        attn_mask.dim()))
+                raise RuntimeError("attn_mask's dimension {} is not supported".format(attn_mask.dim()))
         # attn_mask's dim is 3 now.
 
         if key_padding_mask is not None and key_padding_mask.dtype == int:
             key_padding_mask = key_padding_mask.to(torch.bool)
 
-        q = q.contiguous().view(bs, tgt_len, self.num_heads,
-                                head_dims).permute(0, 2, 1, 3).flatten(0, 1)
+        q = q.contiguous().view(bs, tgt_len, self.num_heads, head_dims).permute(0, 2, 1, 3).flatten(0, 1)
         if k is not None:
-            k = k.contiguous().view(bs, src_len, self.num_heads,
-                                    head_dims).permute(0, 2, 1,
-                                                       3).flatten(0, 1)
+            k = k.contiguous().view(bs, src_len, self.num_heads, head_dims).permute(0, 2, 1, 3).flatten(0, 1)
         if v is not None:
-            v = v.contiguous().view(bs, src_len, self.num_heads,
-                                    v_head_dims).permute(0, 2, 1,
-                                                         3).flatten(0, 1)
+            v = v.contiguous().view(bs, src_len, self.num_heads, v_head_dims).permute(0, 2, 1, 3).flatten(0, 1)
 
         if key_padding_mask is not None:
             assert key_padding_mask.size(0) == bs
             assert key_padding_mask.size(1) == src_len
 
         attn_output_weights = torch.bmm(q, k.transpose(1, 2))
-        assert list(attn_output_weights.size()) == [
-            bs * self.num_heads, tgt_len, src_len
-        ]
+        assert list(attn_output_weights.size()) == [bs * self.num_heads, tgt_len, src_len]
 
         if attn_mask is not None:
             if attn_mask.dtype == torch.bool:
@@ -613,32 +604,23 @@ class ConditionalAttention(BaseModule):
                 attn_output_weights += attn_mask
 
         if key_padding_mask is not None:
-            attn_output_weights = attn_output_weights.view(
-                bs, self.num_heads, tgt_len, src_len)
+            attn_output_weights = attn_output_weights.view(bs, self.num_heads, tgt_len, src_len)
             attn_output_weights = attn_output_weights.masked_fill(
                 key_padding_mask.unsqueeze(1).unsqueeze(2),
                 float('-inf'),
             )
-            attn_output_weights = attn_output_weights.view(
-                bs * self.num_heads, tgt_len, src_len)
+            attn_output_weights = attn_output_weights.view(bs * self.num_heads, tgt_len, src_len)
 
-        attn_output_weights = F.softmax(
-            attn_output_weights -
-            attn_output_weights.max(dim=-1, keepdim=True)[0],
-            dim=-1)
+        attn_output_weights = F.softmax(attn_output_weights - attn_output_weights.max(dim=-1, keepdim=True)[0], dim=-1)
         attn_output_weights = self.attn_drop(attn_output_weights)
 
         attn_output = torch.bmm(attn_output_weights, v)
-        assert list(
-            attn_output.size()) == [bs * self.num_heads, tgt_len, v_head_dims]
-        attn_output = attn_output.view(bs, self.num_heads, tgt_len,
-                                       v_head_dims).permute(0, 2, 1,
-                                                            3).flatten(2)
+        assert list(attn_output.size()) == [bs * self.num_heads, tgt_len, v_head_dims]
+        attn_output = attn_output.view(bs, self.num_heads, tgt_len, v_head_dims).permute(0, 2, 1, 3).flatten(2)
         attn_output = self.out_proj(attn_output)
 
         # average attention weights over heads
-        attn_output_weights = attn_output_weights.view(bs, self.num_heads,
-                                                       tgt_len, src_len)
+        attn_output_weights = attn_output_weights.view(bs, self.num_heads, tgt_len, src_len)
         return attn_output, attn_output_weights.sum(dim=1) / self.num_heads
 
     def forward(self,
@@ -701,18 +683,16 @@ class ConditionalAttention(BaseModule):
                 k = k_content
             q = q.view(bs, nq, self.num_heads, c // self.num_heads)
             query_sine_embed = self.qpos_sine_proj(ref_sine_embed)
-            query_sine_embed = query_sine_embed.view(bs, nq, self.num_heads,
-                                                     c // self.num_heads)
+            query_sine_embed = query_sine_embed.view(bs, nq, self.num_heads, c // self.num_heads)
             q = torch.cat([q, query_sine_embed], dim=3).view(bs, nq, 2 * c)
             k = k.view(bs, hw, self.num_heads, c // self.num_heads)
             k_pos = k_pos.view(bs, hw, self.num_heads, c // self.num_heads)
             k = torch.cat([k, k_pos], dim=3).view(bs, hw, 2 * c)
-            ca_output = self.forward_attn(
-                query=q,
-                key=k,
-                value=v,
-                attn_mask=attn_mask,
-                key_padding_mask=key_padding_mask)[0]
+            ca_output = self.forward_attn(query=q,
+                                          key=k,
+                                          value=v,
+                                          attn_mask=attn_mask,
+                                          key_padding_mask=key_padding_mask)[0]
             query = query + self.proj_drop(ca_output)
         else:
             q_content = self.qcontent_proj(query)
@@ -722,12 +702,11 @@ class ConditionalAttention(BaseModule):
             v = self.v_proj(query)
             q = q_content if q_pos is None else q_content + q_pos
             k = k_content if k_pos is None else k_content + k_pos
-            sa_output = self.forward_attn(
-                query=q,
-                key=k,
-                value=v,
-                attn_mask=attn_mask,
-                key_padding_mask=key_padding_mask)[0]
+            sa_output = self.forward_attn(query=q,
+                                          key=k,
+                                          value=v,
+                                          attn_mask=attn_mask,
+                                          key_padding_mask=key_padding_mask)[0]
             query = query + self.proj_drop(sa_output)
 
         return query
@@ -745,13 +724,11 @@ class MLP(BaseModule):
             layer of MLP only contains FFN (Linear).
     """
 
-    def __init__(self, input_dim: int, hidden_dim: int, output_dim: int,
-                 num_layers: int) -> None:
+    def __init__(self, input_dim: int, hidden_dim: int, output_dim: int, num_layers: int) -> None:
         super().__init__()
         self.num_layers = num_layers
         h = [hidden_dim] * (num_layers - 1)
-        self.layers = ModuleList(
-            Linear(n, k) for n, k in zip([input_dim] + h, h + [output_dim]))
+        self.layers = ModuleList(Linear(n, k) for n, k in zip([input_dim] + h, h + [output_dim]))
 
     def forward(self, x: Tensor) -> Tensor:
         """Forward function of MLP.
@@ -817,8 +794,7 @@ class DynamicConv(BaseModule):
 
         self.num_params_in = self.in_channels * self.feat_channels
         self.num_params_out = self.out_channels * self.feat_channels
-        self.dynamic_layer = nn.Linear(
-            self.in_channels, self.num_params_in + self.num_params_out)
+        self.dynamic_layer = nn.Linear(self.in_channels, self.num_params_in + self.num_params_out)
 
         self.norm_in = build_norm_layer(norm_cfg, self.feat_channels)[1]
         self.norm_out = build_norm_layer(norm_cfg, self.out_channels)[1]
@@ -850,10 +826,8 @@ class DynamicConv(BaseModule):
         input_feature = input_feature.permute(1, 0, 2)
         parameters = self.dynamic_layer(param_feature)
 
-        param_in = parameters[:, :self.num_params_in].view(
-            -1, self.in_channels, self.feat_channels)
-        param_out = parameters[:, -self.num_params_out:].view(
-            -1, self.feat_channels, self.out_channels)
+        param_in = parameters[:, :self.num_params_in].view(-1, self.in_channels, self.feat_channels)
+        param_out = parameters[:, -self.num_params_out:].view(-1, self.feat_channels, self.out_channels)
 
         # input_feature has shape (num_all_proposals, H*W, in_channels)
         # param_in has shape (num_all_proposals, in_channels, feat_channels)

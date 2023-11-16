@@ -248,7 +248,7 @@ class DETRHead(BaseModule):
             num_dec_layer += 1
         return loss_dict
 
-    def loss_by_feat_single(self, cls_scores: Tensor, bbox_preds: Tensor,
+    def loss_by_feat_single(self, cls_scores: Tensor, bbox_preds: Tensor, 
                             batch_gt_instances: InstanceList,
                             batch_img_metas: List[dict]) -> Tuple[Tensor]:
         """Loss function for outputs from a single decoder layer of a single

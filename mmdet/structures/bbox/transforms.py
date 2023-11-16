@@ -7,6 +7,26 @@ from torch import Tensor
 
 from mmdet.structures.bbox import BaseBoxes
 
+def norm_angle(angle, angle_range):
+    """Limit the range of angles.
+
+    Args:
+        angle (ndarray): shape(n, ).
+        angle_range (Str): angle representations.
+
+    Returns:
+        angle (ndarray): shape(n, ).
+    """
+    if angle_range == 'oc':
+        return angle
+    elif angle_range == 'le135':
+        return (angle + np.pi / 4) % np.pi - np.pi / 4
+    elif angle_range == 'le90':
+        return (angle + np.pi / 2) % np.pi - np.pi / 2
+    elif angle_range == 'r360':
+        return (angle + np.pi) % (2 * np.pi) - np.pi
+    else:
+        print('Not yet implemented.')
 
 def find_inside_bboxes(bboxes: Tensor, img_h: int, img_w: int) -> Tensor:
     """Find bboxes as long as a part of bboxes is inside the image.

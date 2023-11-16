@@ -11,3 +11,5 @@ param_scheduler = [
         milestones=[30],
         gamma=0.1)
 ]
+train_dataloader = dict(batch_size=1,
+    num_workers=2)

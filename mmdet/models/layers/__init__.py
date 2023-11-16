@@ -19,6 +19,8 @@ from .res_layer import ResLayer, SimplifiedBasicBlock
 from .se_layer import ChannelAttention, DyReLU, SELayer
 # yapf: disable
 from .transformer import (MLP, AdaptivePadding, CdnQueryGenerator,
+                          CdnQueryGenerator_rpn,
+                          CdnQueryGenrator_rpn_rot,
                           ConditionalAttention,
                           ConditionalDetrTransformerDecoder,
                           ConditionalDetrTransformerDecoderLayer,
@@ -37,6 +39,8 @@ from .transformer import (MLP, AdaptivePadding, CdnQueryGenerator,
                           Mask2FormerTransformerEncoder, PatchEmbed,
                           PatchMerging, coordinate_to_encoding,
                           inverse_sigmoid, nchw_to_nlc, nlc_to_nchw)
+from .yolo_bricks import MaxPoolAndStrideConvBlock, RepVGGBlock, SPPFCSPBlock,ImplicitA,ImplicitM
+
 
 # yapf: enable
 
@@ -61,5 +65,8 @@ __all__ = [
     'ConditionalDetrTransformerDecoderLayer', 'DinoTransformerDecoder',
     'CdnQueryGenerator', 'Mask2FormerTransformerEncoder',
     'Mask2FormerTransformerDecoderLayer', 'Mask2FormerTransformerDecoder',
-    'SinePositionalEncoding3D', 'FrozenBatchNorm2d'
+    'SinePositionalEncoding3D', 'FrozenBatchNorm2d', 
+    'fast_nms', 'multiclass_nms', 'mask_matrix_nms', 'DropBlock',
+    'MaxPoolAndStrideConvBlock', 'RepVGGBlock', 'SPPFCSPBlock', 'ImplicitA',
+    'ImplicitM', 'CdnQueryGenerator_rpn', 'CdnQueryGenrator_rpn_rot'
 ]

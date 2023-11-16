@@ -52,6 +52,9 @@ from .yolact_head import YOLACTHead, YOLACTProtonet
 from .yolo_head import YOLOV3Head
 from .yolof_head import YOLOFHead
 from .yolox_head import YOLOXHead
+from .icann_rpn_head import ICANN_Rpn_Head,YOLOv7HeadModule,YOLOv7p6HeadModule, YOLOv8HeadModule, YOLOv8Head
+from .icann_defor_detr_head import ICANN_DeforDETRHead
+from .rot_dino_head import Rot_DINOHead
 
 __all__ = [
     'AnchorFreeHead', 'AnchorHead', 'GuidedAnchorHead', 'FeatureAdaption',
@@ -68,5 +71,6 @@ __all__ = [
     'CenterNetUpdateHead', 'RTMDetHead', 'RTMDetSepBNHead', 'CondInstBboxHead',
     'CondInstMaskHead', 'RTMDetInsHead', 'RTMDetInsSepBNHead',
     'BoxInstBboxHead', 'BoxInstMaskHead', 'ConditionalDETRHead', 'DINOHead',
-    'ATSSVLFusionHead', 'DABDETRHead', 'DDQDETRHead', 'GroundingDINOHead'
+    'ATSSVLFusionHead', 'DABDETRHead', 'DDQDETRHead', 'GroundingDINOHead',
+    'ICANN_Rpn_Head','YOLOv7HeadModule','YOLOv7p6HeadModule', 'ICANN_DeforDETRHead', 'Rot_DINOHead', 'YOLOv8HeadModule', 'YOLOv8Head'
 ]

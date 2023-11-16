@@ -9,6 +9,7 @@ from mmengine.utils import ProgressBar
 from mmdet.models.utils import mask2ndarray
 from mmdet.registry import DATASETS, VISUALIZERS
 from mmdet.structures.bbox import BaseBoxes
+from mmdet.utils import register_all_modules
 
 
 def parse_args():
@@ -47,8 +48,10 @@ def main():
 
     # register all modules in mmdet into the registries
     init_default_scope(cfg.get('default_scope', 'mmdet'))
+    register_all_modules()
 
     dataset = DATASETS.build(cfg.train_dataloader.dataset)
+    # dataset = DATASETS.build(cfg.test_dataloader.dataset)
     visualizer = VISUALIZERS.build(cfg.visualizer)
     visualizer.dataset_meta = dataset.metainfo
 

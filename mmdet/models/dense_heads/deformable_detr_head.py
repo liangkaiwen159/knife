@@ -138,7 +138,7 @@ class DeformableDETRHead(DETRHead):
 
         all_layers_outputs_classes = torch.stack(all_layers_outputs_classes)
         all_layers_outputs_coords = torch.stack(all_layers_outputs_coords)
-
+        
         return all_layers_outputs_classes, all_layers_outputs_coords
 
     def loss(self, hidden_states: Tensor, references: List[Tensor],
