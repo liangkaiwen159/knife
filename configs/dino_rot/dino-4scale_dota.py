@@ -1,12 +1,15 @@
 _base_ = ['../_base_/datasets/dota.py', '../_base_/default_runtime.py']
 
-import os
-user_name = os.getlogin()
+import torch
 
-if user_name == 'liangkaiwen':
+gpu_name = str(torch.cuda.get_device_properties(0))
+
+if '3090' in gpu_name:
     data_root = 'data/split_ss_dota/'
-else:
+elif 'TITAN RTX' in gpu_name:
     data_root = '/home/jinyu/jinyu_ws/split_ss_dota'
+elif 'V100' in gpu_name:
+    data_root = '/root/kevin_ws/datasets/split_ss_dota'
 
 angle_version = 'le901'
 nums_of_level = 4
