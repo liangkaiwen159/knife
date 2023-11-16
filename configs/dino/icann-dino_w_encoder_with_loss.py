@@ -155,7 +155,7 @@ model = dict(
 # train_pipeline, NOTE the img_scale and the Pad's size_divisor is different
 # from the default setting in mmdet.
 # train_pipeline = [
-#     dict(type='LoadImageFromFile', file_client_args={{_base_.file_client_args}}),
+#     dict(type='LoadImageFromFile'),
 #     dict(type='LoadAnnotations', with_bbox=True),
 #     dict(type='RandomFlip', prob=0.5),
 #     dict(
@@ -185,8 +185,7 @@ model = dict(
 # ]
 train_pipeline = [
     dict(
-        type='LoadImageFromFile',
-        file_client_args={{_base_.file_client_args}}),
+        type='LoadImageFromFile'),
     dict(type='LoadAnnotations', with_bbox=True),
     dict(type='RandomFlip', prob=0.5),
     dict(type='Resize', keep_ratio=True, scale=img_scale),
@@ -202,8 +201,7 @@ train_dataloader = dict(
 
 test_pipeline = [
     dict(
-        type='LoadImageFromFile',
-        file_client_args={{_base_.file_client_args}}),
+        type='LoadImageFromFile'),
     dict(type='Resize', scale=img_scale, keep_ratio=True),
     # If you don't have a gt annotation, delete the pipeline
     dict(type='LoadAnnotations', with_bbox=True),

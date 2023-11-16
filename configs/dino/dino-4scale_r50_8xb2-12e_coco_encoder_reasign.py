@@ -90,8 +90,7 @@ model = dict(
 # from the default setting in mmdet.
 train_pipeline = [
     dict(
-        type='LoadImageFromFile',
-        file_client_args={{_base_.file_client_args}}),
+        type='LoadImageFromFile'),
     dict(type='LoadAnnotations', with_bbox=True),
     dict(type='RandomFlip', prob=0.5),
     dict(
