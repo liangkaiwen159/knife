@@ -8,7 +8,7 @@ if user_name == 'liangkaiwen':
 else:
     data_root = '/home/jinyu/jinyu_ws/split_ss_dota'
 
-angle_version = 'le135'
+angle_version = 'le901'
 nums_of_level = 4
 model = dict(
     type='Rot_DINO',

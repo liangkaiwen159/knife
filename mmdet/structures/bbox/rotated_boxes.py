@@ -92,6 +92,8 @@ class RotatedBoxes(BaseBoxes):
                 width_longer, start_angle = False, -90
             elif pattern == 'le90':
                 width_longer, start_angle = True, -90
+            elif pattern == 'le901':
+                width_longer, start_angle = True, -90
             elif pattern == 'le135':
                 width_longer, start_angle = True, -45
             else:
