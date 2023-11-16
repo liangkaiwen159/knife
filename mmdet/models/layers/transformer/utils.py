@@ -108,20 +108,24 @@ def inverse_sigmoid(x: Tensor, eps: float = 1e-5) -> Tensor:
 
 
 def act_rot_sigmoid(x: Tensor, angle_version: str = 'le90') -> Tensor:
-    assert angle_version in {'le90', 'le135'}
+    assert angle_version in ('le90', 'le135', 'le901')
     x = x.sigmoid()
     if angle_version == 'le90':
         return np.pi * x - np.pi / 2
     elif angle_version == 'le135':
         return np.pi * x - np.pi / 4
+    elif angle_version == 'le901':
+        return np.pi * 3 / 4 * (2 * x - 1)
 
 
 def inverse_act_rot_sigmoid(x: Tensor, angle_version: str = 'le90', eps: float = 1e-3) -> Tensor:
-    assert angle_version in {'le90', 'le135'}
+    assert angle_version in ('le90', 'le135', 'le901')
     if angle_version == 'le90':
         return inverse_sigmoid(x / np.pi + 0.5, eps)
     elif angle_version == 'le135':
         return inverse_sigmoid(x / np.pi + 0.25, eps)
+    elif angle_version == 'le901':
+        return inverse_sigmoid(x / np.pi * 2 / 3 + 0.5, eps)
 
 
 def rot_coord_sigmoid(x: Tensor, angle_version: str = 'le90'):
@@ -568,7 +572,7 @@ class ConditionalAttention(BaseModule):
 
             if attn_mask.dtype == torch.uint8:
                 warnings.warn('Byte tensor for attn_mask is deprecated.\
-                     Use bool tensor instead.')
+                     Use bool tensor instead.'                                              )
                 attn_mask = attn_mask.to(torch.bool)
             if attn_mask.dim() == 2:
                 attn_mask = attn_mask.unsqueeze(0)

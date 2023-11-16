@@ -1,9 +1,13 @@
 _base_ = ['../_base_/datasets/dota.py', '../_base_/default_runtime.py']
 
-import torch
+import os
 
-data_root = 'data/split_ss_dota/' if torch.cuda.device_count(
-) <= 3 else '/home/jinyu/jinyu_ws/split_ss_dota'
+user_name = os.getlogin()
+
+if user_name == 'liangkaiwen':
+    data_root = 'data/split_ss_dota/'
+else:
+    data_root = '/home/jinyu/jinyu_ws/split_ss_dota'
 
 angle_version = 'le135'
 nums_of_level = 3
