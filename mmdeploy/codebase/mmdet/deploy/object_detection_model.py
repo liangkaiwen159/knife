@@ -197,8 +197,12 @@ class End2EndModel(BaseBackendModel):
             pred_instances = InstanceData()
             device = dets.device
             labels = labels.to(device)
-            bboxes = dets[:, :4]
-            scores = dets[:, 4]
+            if dets.shape[-1] == 5:
+                bboxes = dets[:, :4]
+                scores = dets[:, 4]
+            elif dets.shape[-1] == 6:
+                bboxes = dets[:, :5]
+                scores = dets[:, 5]
             scale_factor = bboxes.new_ones(4)
             # get scale_factor
             if 'scale_factor' in img_metas[i]:
@@ -212,7 +216,7 @@ class End2EndModel(BaseBackendModel):
                 assert len(scale_factor) == 4
                 scale_factor = torch.tensor(scale_factor).to(dets)
             if rescale:
-                bboxes /= scale_factor.view(1, 4)
+                bboxes[:, :4] /= scale_factor.view(1, 4)
 
             # Most of models in mmdetection 3.x use `pad_param`, but some
             # models like CenterNet uses `border`.
