@@ -1,6 +1,6 @@
 # dataset settings
 dataset_type = 'KnifeDataset'
-data_root = 'data/knife_test'
+data_root = 'data/gejiao'
 
 size = (720, 1280)
 # Example to use different file client
@@ -39,8 +39,9 @@ train_dataloader = dict(batch_size=2,
                         batch_sampler=dict(type='AspectRatioBatchSampler'),
                         dataset=dict(type=dataset_type,
                                      data_root=data_root,
+                                     split='train',
                                      ann_file='annos/annos.json',
-                                     data_prefix=dict(img='imgs/'),
+                                     data_prefix=dict(img='images/'),
                                      filter_cfg=dict(filter_empty_gt=True, min_size=32),
                                      pipeline=train_pipeline,
                                      backend_args=backend_args))
@@ -51,8 +52,9 @@ val_dataloader = dict(batch_size=1,
                       sampler=dict(type='DefaultSampler', shuffle=False),
                       dataset=dict(type=dataset_type,
                                    data_root=data_root,
+                                   split='val',
                                    ann_file='annos/annos.json',
-                                   data_prefix=dict(img='imgs/'),
+                                   data_prefix=dict(img='images/'),
                                    test_mode=True,
                                    pipeline=test_pipeline,
                                    backend_args=backend_args))

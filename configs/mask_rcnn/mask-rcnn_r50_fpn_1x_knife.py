@@ -5,8 +5,11 @@ _base_ = [
 
 num_classes = 1
 
+
+train_dataloader = dict(batch_size=2)
+
 default_hooks = dict(
-    logger=dict(interval=1),
+    logger=dict(interval=10),
     checkpoint=dict(type='CheckpointHook', interval=50, save_best='auto'),
 )
 
